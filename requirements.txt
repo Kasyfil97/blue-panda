@@ -1,0 +1,7 @@
+openai>=2.44.0
+pandas>=3.0.3
+openpyxl>=3.1.5
+python-dotenv>=1.2.2
+tqdm>=4.68.3
+requests>=2.32.0
+psycopg2-binary>=2.9.9  # KATA cache Postgres lookups (only needed when KATA is enabled)
