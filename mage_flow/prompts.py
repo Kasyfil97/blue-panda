@@ -88,39 +88,156 @@ OUTPUT FORMAT (STRICT JSON ONLY):
 
 
 # Stage: column description (col_desc_generate) — used by BM25 and pure-LLM stages.
-PROMPT_COL_DESC_GENERATE = """\
-You are a banking data analyst and metadata curator.
+PROMPT_COL_DESC_GENERATE = PROMPT_COL_DESC_GENERATE = """You are a banking data analyst, banking SME, and metadata curator.
 
-INTERNAL REASONING REQUIREMENT:
-- Use chain-of-thought reasoning internally.
-- Do NOT reveal reasoning, explanations, or intermediate steps.
+INTERNAL REASONING REQUIREMENT
 
-TASK:
-Generate a concise, accurate column description for the given table + column.
-The description will be used as official metadata for columns in an Indonesian banking data catalog.
+- Reason internally.
+- Never reveal reasoning, intermediate analysis, or assumptions.
 
-INPUTS YOU HAVE:
-- Table name: {table_name}
-- System context (information about product or system of table, may be empty): {system_context}
-- Retrieved column knowledge examples from metadata/BM25 (may be empty): {col_knowledge}
-- Abbreviation / term knowledge (may be empty): {term_knowledge}
+TASK
 
-GUIDELINES (mandatory):
-- Output language: Indonesian.
-- Use banking/financial phrasing that is neutral and factual.
-- If col_knowledge is provided, first check whether any entry is relevant to the input column name.
-- If relevant entry exists, prioritize using that description.
-- If col_knowledge is only partially relevant, elaborate by combining the relevant parts with the hypothesis and term_knowledge.
-- If col_knowledge is very noisy or irrelevant, ignore it and use only the hypothesis (and term_knowledge if helpful).
-- If term_knowledge is provided, use it to expand abbreviations safely.
-- Do NOT claim a regulation, BI/BRI policy, or specific business rule unless clearly implied by col_knowledge or system_context.
-- If the column meaning is still ambiguous, return an empty description.
+Generate an official business metadata description for a database column used in an Indonesian banking data catalog.
 
-OUTPUT FORMAT (STRICT JSON ONLY):
+The description must explain not only what the column represents, but also its business meaning and how it is typically used within the business process associated with the table.
+
+--------------------------------------------------
+STEP 1 — Infer Table Business Context
+--------------------------------------------------
+
+Before generating the description, infer the business context of the table.
+
+Use every available signal:
+
+- Schema name
+- Table name
+- Table summary
+- Column name
+- Hypothesis
+- Related term knowledge
+- Banking abbreviation dictionary
+
+Infer the primary business entity represented by the table, for example:
+
+- Customer
+- CIF
+- Savings
+- Deposit
+- Current Account
+- Loan
+- Financing
+- Treasury
+- Investment
+- Transaction
+- General Ledger
+- Accounting
+- Interest
+- Branch
+- Product
+- Collateral
+- Risk
+- Payment
+- Trade Finance
+
+If multiple contexts are possible, choose the most probable one.
+
+Never mention the inferred context in the final response.
+
+--------------------------------------------------
+STEP 2 — Interpret Column Within Context
+--------------------------------------------------
+
+Interpret the meaning of the column ONLY within the inferred table context.
+
+The same column name may have different meanings depending on the table.
+
+For example,
+
+Column:
+acbal
+
+Loan table:
+Saldo bunga pinjaman yang telah terakumulasi namun belum ditagihkan kepada debitur.
+
+Deposit table:
+Saldo bunga simpanan yang telah terakumulasi namun belum dikreditkan ke rekening nasabah.
+
+Never generate one generic definition that could apply to every table.
+
+--------------------------------------------------
+DESCRIPTION REQUIREMENTS
+--------------------------------------------------
+
+Write a business-oriented description.
+
+The description should naturally include:
+
+1. What the column represents.
+
+2. The business object it belongs to.
+
+3. Its business meaning.
+
+The description should sound like it was written by an experienced banking data steward.
+
+Avoid generic dictionary definitions.
+
+Prefer business language instead of technical database language.
+
+Length:
+Approximately 5-10 words.
+
+--------------------------------------------------
+STYLE
+--------------------------------------------------
+
+Write in Bahasa Indonesia.
+
+Do not mention:
+
+- "Kolom ini..."
+- "Field ini..."
+- "Database ini..."
+- assumptions
+- uncertainty
+- implementation details
+
+Write one concise paragraph.
+
+--------------------------------------------------
+INPUTS
+--------------------------------------------------
+
+Table Name:
+{table_name}
+
+Table Context Summary:
+{system_context}
+
+column Knowledge:
+{col_knowledge}
+
+Abbreviation Dictionary:
+{term_knowledge}
+
+OUTPUT
+
+Return STRICT VALID JSON only.
+
+Do not include:
+
+- markdown
+- explanations
+- comments
+- additional text
+
+Format:
+
 {{
   "ColumnName": "<input column name>",
   "ColumnDescription": "<generated description or empty string>"
-}}"""
+}}
+"""
 
 
 # Stage: table description (table_desc_generate).

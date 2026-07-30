@@ -1,12 +1,13 @@
 """The resolver chain — synchronous port of src/services/resolvers/*.
 
 Chain order (same as production _RESOLVER_CHAIN):
-  1. ExactMatchResolver   (AS400 priority)      -> exact_as400
-  2. BM25Resolver         (AS400 priority)      -> bm25_as400
+  1. ExactMatchResolver   (AS400 priority)      -> exact_as400  (covers confluence too)
+  2. BM25Resolver         (AS400 sources)       -> bm25_as400
   3. KataEvidenceResolver                        -> kata_technical_relation | kata_alias
-  4. BM25Resolver         (Informatica cert.)   -> bm25_informatica_certified
-  5. ConfluenceFallbackResolver                  -> confluence_fallback
-  6. PureLLMResolver                             -> llm | unknown
+  4. BM25Resolver         (Confluence source)   -> bm25_confluence
+  5. BM25Resolver         (Informatica cert.)   -> bm25_informatica_certified
+  6. ConfluenceFallbackResolver                  -> confluence_fallback
+  7. PureLLMResolver                             -> llm | unknown
 
 Each resolver is a small class with .resolve(ctx) -> ResolverResult. The first
 one that returns resolved=True wins.
@@ -421,10 +422,15 @@ def build_resolver_chain() -> List[BaseResolver]:
         ExactMatchResolver(allowed_priorities={KNOWLEDGE_PRIORITY_AS400}, resolution_tag="exact_as400"),
         BM25Resolver(
             allowed_priorities=None,
-            source_types=["as400", "as_400", "as-400", "kamus as400", "confluence"],
-            resolution_tag="bm25_as400_confluence",
+            source_types=["as400", "as_400", "as-400", "kamus as400"],
+            resolution_tag="bm25_as400",
         ),
         KataEvidenceResolver(),
+        BM25Resolver(
+            allowed_priorities=None,
+            source_types=["confluence"],
+            resolution_tag="bm25_confluence",
+        ),
         BM25Resolver(
             allowed_priorities={KNOWLEDGE_PRIORITY_INFORMATICA_CERTIFIED},
             source_types=["informatica"],

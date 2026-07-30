@@ -73,23 +73,30 @@ logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are a semantic similarity evaluator for database column descriptions.
+
 Your task is to compare a reference "Column Description" with a "Predicted Column Description"
-and judge whether their **meanings** are equivalent, partially overlapping, or clearly different.
+and determine how closely their meanings are related.
 
 Classification rules
 --------------------
-similar   – The predicted description conveys the same core meaning as the reference.
-            Minor differences in phrasing, language (Indonesian vs English), or level of detail
-            are acceptable as long as the essential concept is the same.
+similar   – The predicted description has the same meaning as the reference,
+            or is semantically related to it. Differences in wording,
+            language (Indonesian vs English), or level of detail are acceptable
+            as long as they describe the same concept or have a semantic correlation.
 
-partial   – The predicted description overlaps with the reference but is either
-            noticeably broader, narrower, or adds/misses a meaningful aspect.
-            They share a common topic but are not interchangeable.
+partial   – The predicted description has only a limited semantic correlation
+            with the reference. They share some related aspects or context,
+            but the overlap is not strong enough to be considered equivalent.
 
-unsimilar – The predicted description describes a clearly different concept
-            or is so vague/wrong that it does not represent the reference meaning.
+unsimilar – The predicted description has a meaning that is substantially different
+            from the reference, or the semantic correlation between them is weak
+            or nonexistent.
 
-IMPORTANT: Respond with ONLY one word — exactly one of: similar, partial, unsimilar.
+IMPORTANT: Respond with ONLY one word — exactly one of:
+similar
+partial
+unsimilar
+
 Do not include any explanation, punctuation, or extra text.
 """
 
@@ -182,7 +189,7 @@ async def evaluate_all(df: pd.DataFrame) -> list[str]:
         evaluate_one(
             client, semaphore,
             idx=i,
-            reference=row["Business Title"],
+            reference=row["Column Description"],
             predicted=row["Predicted Column Description"],
         )
         for i, row in df.iterrows()
