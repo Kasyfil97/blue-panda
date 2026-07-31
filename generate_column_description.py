@@ -1,7 +1,7 @@
 """Standalone single-column description generator — experimental CLI.
 
-Runs the FULL 7-stage resolver chain ported from ms-bribrain-mage
-(exact AS400/Confluence -> bm25 AS400 -> KATA -> bm25 Confluence -> bm25 Informatica
+Runs the FULL 6-stage resolver chain ported from ms-bribrain-mage
+(exact AS400/Confluence -> bm25 AS400/Confluence -> KATA -> bm25 Informatica
 -> Confluence fallback -> pure LLM) for one column. All the logic lives in the
 `mage_flow/` package next to this file; edit prompts in mage_flow/prompts.py and
 knobs/flags in mage_flow/config.py.

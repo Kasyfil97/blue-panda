@@ -88,7 +88,7 @@ OUTPUT FORMAT (STRICT JSON ONLY):
 
 
 # Stage: column description (col_desc_generate) — used by BM25 and pure-LLM stages.
-PROMPT_COL_DESC_GENERATE = PROMPT_COL_DESC_GENERATE = """You are a banking data analyst, banking SME, and metadata curator.
+PROMPT_COL_DESC_GENERATE = """You are a banking data analyst, banking SME, and metadata curator.
 
 INTERNAL REASONING REQUIREMENT
 
