@@ -164,11 +164,18 @@ class BM25Resolver(BaseResolver):
         *,
         allowed_priorities: Optional[Set[int]] = None,
         source_types: Optional[List[str]] = None,
+        source_types_selector=None,
         resolution_tag: str = "llm",
     ) -> None:
         self.allowed_priorities = frozenset(allowed_priorities) if allowed_priorities else None
         self.source_types = list(source_types) if source_types else None
+        self.source_types_selector = source_types_selector
         self.resolution_tag = resolution_tag
+
+    def _get_source_types(self, table_name: str) -> Optional[List[str]]:
+        if self.source_types_selector is not None:
+            return self.source_types_selector(table_name)
+        return self.source_types
 
     @property
     def name(self) -> str:
@@ -178,6 +185,8 @@ class BM25Resolver(BaseResolver):
         term_cfg = ctx.bm25_params.get("term", {})
         global_cfg = ctx.bm25_params.get("global", {})
 
+        effective_source_types = self._get_source_types(ctx.table_name)
+        logger.info("[bm25:%s] %s.%s: effective source_types=%r", self.resolution_tag, ctx.table_name, ctx.col_name, effective_source_types)
         logger.info("[bm25:%s] %s.%s: term search table-filtered (docs=%d)", self.resolution_tag, ctx.table_name, ctx.col_name, len(ctx.table_hits or []))
         raw_tf = self._table_filtered_search(ctx, term_cfg)
         col_knowledges = filter_by_priority(raw_tf, self.allowed_priorities)
@@ -191,13 +200,11 @@ class BM25Resolver(BaseResolver):
             logger.info("[bm25:%s] no usable knowledge -> skip", self.resolution_tag)
             return ResolverResult(False, "bm25")
 
-        hypothesis = ctx.get_hypothesis()
         abbr_context = ctx.get_abbr_context()
         logger.info("[bm25:%s] synthesizing description via LLM from %d knowledge item(s)", self.resolution_tag, len(col_knowledges))
         out = ctx.llm.col_desc_generate(
             table_name=ctx.table_name,
             col_name=ctx.col_name,
-            system_context=hypothesis,
             col_knowledge=col_knowledges,
             term_knowledge=abbr_context,
             sampling_params=ctx.sampling_params,
@@ -221,7 +228,7 @@ class BM25Resolver(BaseResolver):
             table_name_boost=float(term_cfg.get("table_name_boost", 2.0)),
             table_scores=table_scores,
             table_score_alpha=float(term_cfg.get("table_score_alpha", 0.9)),
-            source_types=self.source_types,
+            source_types=self._get_source_types(ctx.table_name),
             request_id=ctx.request_id,
         )
 
@@ -232,7 +239,7 @@ class BM25Resolver(BaseResolver):
             topk=int(global_cfg.get("top_k", 5)),
             threshold=float(global_cfg.get("threshold", 1.0)),
             table_name_boost=float(global_cfg.get("table_name_boost", 2.0)),
-            source_types=self.source_types,
+            source_types=self._get_source_types(ctx.table_name),
             request_id=ctx.request_id,
         )
 
@@ -399,11 +406,11 @@ class PureLLMResolver(BaseResolver):
             logger.info("[pure_llm] understood -> proceed to generation")
 
         abbr_context = ctx.get_abbr_context()
-        logger.info("[pure_llm] generating description from hypothesis (LLM col_desc_generate)")
+        logger.info("[pure_llm] generating description (LLM col_desc_generate)")
         out = ctx.llm.col_desc_generate(
             table_name=ctx.table_name,
             col_name=ctx.col_name,
-            system_context=hypothesis,
+            system_context=ctx.system_context,
             col_knowledge="",
             term_knowledge=abbr_context,
             sampling_params=ctx.sampling_params,
@@ -417,12 +424,19 @@ class PureLLMResolver(BaseResolver):
 # The chain (same order + priorities as production _RESOLVER_CHAIN)
 # ---------------------------------------------------------------------------
 
+def _as400_confluence_source_types(table_name: str) -> List[str]:
+    """Route to AS400 sources for tables whose name contains 'as4', else Confluence."""
+    if "as4" in norm(table_name).lower():
+        return ["as400", "as_400", "as-400", "kamus as400"]
+    return ["confluence"]
+
+
 def build_resolver_chain() -> List[BaseResolver]:
     return [
         ExactMatchResolver(allowed_priorities={KNOWLEDGE_PRIORITY_AS400}, resolution_tag="exact_as400"),
         BM25Resolver(
             allowed_priorities=None,
-            source_types=["as400", "as_400", "as-400", "kamus as400", "confluence"],
+            source_types_selector=_as400_confluence_source_types,
             resolution_tag="bm25_as400_confluence",
         ),
         KataEvidenceResolver(),

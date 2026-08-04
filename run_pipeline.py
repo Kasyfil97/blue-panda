@@ -35,6 +35,8 @@ BASE_DIR = Path(__file__).parent
 
 # Module-level load_dotenv calls inside each module handle credential loading.
 from mage_flow import default_settings, generate_column             # noqa: E402
+from mage_flow.clients import BedrockLLMClient                      # noqa: E402
+from mage_flow.llm_generation import LLMGeneration                  # noqa: E402
 from evaluate_column_description import evaluate_all                 # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -89,11 +91,11 @@ def _format_knowledges(knowledges: list) -> str:
     return "\n".join(parts)
 
 
-def _load_checkpoint(df: pd.DataFrame) -> pd.DataFrame:
+def _load_checkpoint(df: pd.DataFrame, checkpoint_file: Path = CHECKPOINT_FILE) -> pd.DataFrame:
     """Merge checkpointed predictions back into df if a checkpoint file exists."""
-    if CHECKPOINT_FILE.exists():
-        logger.info("Found checkpoint — resuming from %s", CHECKPOINT_FILE)
-        ckpt = pd.read_excel(CHECKPOINT_FILE)
+    if checkpoint_file.exists():
+        logger.info("Found checkpoint — resuming from %s", checkpoint_file)
+        ckpt = pd.read_excel(checkpoint_file)
         for col in (PREDICTED_COL, RESOLVER_COL, KNOWLEDGE_COL):
             if col in ckpt.columns:
                 df[col] = ckpt[col].values
@@ -125,25 +127,25 @@ def _build_summary(labels: list[str], total: int) -> pd.DataFrame:
 _df_lock = threading.Lock()
 
 
-def _infer_row(i: int, table_name: str, col_name: str, settings: dict) -> tuple[int, str, str, str]:
-    """Run inference for one row; returns (index, description, resolver, knowledge)."""
+def _infer_row(i: int, table_name: str, col_name: str, settings: dict, llm: LLMGeneration) -> tuple[int, str, str, str, str]:
+    """Run inference for one row; returns (index, description, business_title, resolver, knowledge)."""
     try:
-        result = generate_column(table_name, col_name, settings=settings)
+        result = generate_column(table_name, col_name, settings=settings, llm=llm)
         knowledge = _format_knowledges(result.get("knowledges", []))
-        return i, result.get("description", ""), result.get("resolver", ""), knowledge
+        return i, result.get("description", ""), result.get("business_title", ""), result.get("resolver", ""), knowledge
     except Exception as exc:
         logger.error("Row %d (%s.%s) failed: %s", i, table_name, col_name, exc)
-        return i, "", "error", ""
+        return i, "", "", "error", ""
 
 
-def run_inference(df: pd.DataFrame, force: bool = False, workers: int = 1) -> pd.DataFrame:
+def run_inference(df: pd.DataFrame, force: bool = False, workers: int = 1, checkpoint_file: Path = CHECKPOINT_FILE) -> pd.DataFrame:
     """Call generate_column_description for each row with a missing prediction."""
-    if PREDICTED_COL not in df.columns:
-        df[PREDICTED_COL] = ""
-    if RESOLVER_COL not in df.columns:
-        df[RESOLVER_COL] = ""
-    if KNOWLEDGE_COL not in df.columns:
-        df[KNOWLEDGE_COL] = ""
+    for col in (PREDICTED_COL, EVAL_PREDICTED_COL, RESOLVER_COL, KNOWLEDGE_COL):
+        if col not in df.columns:
+            df[col] = ""
+        # Ensure object dtype so string assignment doesn't raise TypeError
+        # when the column was loaded as float64 (all-NaN from a prior failed run).
+        df[col] = df[col].astype(object).where(df[col].notna(), "")
 
     pending = [
         i for i, row in df.iterrows()
@@ -156,27 +158,29 @@ def run_inference(df: pd.DataFrame, force: bool = False, workers: int = 1) -> pd
 
     logger.info("Inference: %d row(s) to process with %d worker(s).", len(pending), workers)
 
-    # Resolve settings once and reuse across workers (edit toggles here, e.g.
-    # settings["kata"]["enabled"] = True, to mirror generate_column_description.py).
     settings = default_settings()
+    settings["business_title"]["enabled"] = True   # force-generate business title per row
+    # Single shared LLM client — avoids re-authenticating OIDC per row.
+    llm = LLMGeneration(BedrockLLMClient())
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
-            executor.submit(_infer_row, i, str(df.at[i, TABLE_COL]), str(df.at[i, COLUMN_COL]), settings): i
+            executor.submit(_infer_row, i, str(df.at[i, TABLE_COL]), str(df.at[i, COLUMN_COL]), settings, llm): i
             for i in pending
         }
 
         with tqdm(total=len(pending), desc="Inference", unit="row") as pbar:
             for future in as_completed(futures):
-                i, desc, resolver, knowledge = future.result()
+                i, desc, bt, resolver, knowledge = future.result()
                 with _df_lock:
-                    df.at[i, PREDICTED_COL] = desc
-                    df.at[i, RESOLVER_COL]  = resolver
-                    df.at[i, KNOWLEDGE_COL] = knowledge
-                    df.to_excel(CHECKPOINT_FILE, index=False)
+                    df.at[i, PREDICTED_COL]    = desc
+                    df.at[i, EVAL_PREDICTED_COL] = bt
+                    df.at[i, RESOLVER_COL]     = resolver
+                    df.at[i, KNOWLEDGE_COL]    = knowledge
+                    df.to_excel(checkpoint_file, index=False)
                 pbar.update(1)
 
-    logger.info("Inference complete. Checkpoint: %s", CHECKPOINT_FILE)
+    logger.info("Inference complete. Checkpoint: %s", checkpoint_file)
     return df
 
 
@@ -186,9 +190,10 @@ def run_inference(df: pd.DataFrame, force: bool = False, workers: int = 1) -> pd
 
 def run_evaluation(df: pd.DataFrame) -> pd.DataFrame:
     """Score business-title predictions via LLM judge (evaluate_all from evaluate_column_description)."""
-    missing = [c for c in (EVAL_REFERENCE_COL, EVAL_PREDICTED_COL) if c not in df.columns]
-    if missing:
-        raise ValueError(f"Evaluation requires columns: {missing}")
+    # missing = [c for c in (EVAL_REFERENCE_COL, EVAL_PREDICTED_COL) if c not in df.columns]
+    # missing = [c for c in (EVAL_RERENCE_COL, EVAL_PREDICTED_COL) if c not in df.columns]
+    # if missing:
+    #     raise ValueError(f"Evaluation requires columns: {missing}")
 
     # evaluate_all reads hardcoded 'Column Description'/'Predicted Column Description'
     # columns, so map the business-title pair onto those names. It also expects a
@@ -211,7 +216,8 @@ def run_evaluation(df: pd.DataFrame) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Inference + evaluation pipeline for data_test.xlsx")
+    parser = argparse.ArgumentParser(description="Inference + evaluation pipeline")
+    parser.add_argument("--input",  default=None, help="Input Excel file (default: data_test.xlsx)")
     parser.add_argument("--skip-inference", action="store_true", help="Skip inference step")
     parser.add_argument("--skip-eval",      action="store_true", help="Skip evaluation step")
     parser.add_argument(
@@ -224,16 +230,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    date_tag = datetime.now().strftime("%Y%m%d")
-    output_file = BASE_DIR / "evaluation" / f"data_test_pipeline_output_{date_tag}.xlsx"
+    input_file = Path(args.input) if args.input else INPUT_FILE
+    stem = input_file.stem
+    checkpoint_file = BASE_DIR / f"{stem}_checkpoint.xlsx"
 
-    logger.info("Reading %s …", INPUT_FILE)
-    df = pd.read_excel(INPUT_FILE)
+    date_tag = datetime.now().strftime("%Y%m%d")
+    output_file = BASE_DIR / "evaluation" / f"{stem}_pipeline_output_{date_tag}.xlsx"
+
+    logger.info("Reading %s …", input_file)
+    df = pd.read_excel(input_file)
 
     # Step 1
     if not args.skip_inference:
-        df = _load_checkpoint(df)
-        df = run_inference(df, force=args.force, workers=args.workers)
+        df = _load_checkpoint(df, checkpoint_file)
+        df = run_inference(df, force=args.force, workers=args.workers, checkpoint_file=checkpoint_file)
 
     # Step 2
     if not args.skip_eval:

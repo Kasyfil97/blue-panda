@@ -61,6 +61,20 @@ KATA_PG_SCHEMA = os.getenv("KATA_PGSCHEMA", "public")
 KATA_PG_USER = os.getenv("KATA_PGUSER", "admin")
 KATA_PG_PASSWORD = os.getenv("KATA_PGPASSWORD", "postgres")
 
+# AWS Bedrock (OIDC federation — mirrors bedrock_session.py)
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "openai.gpt-oss-120b-1:0")
+AWS_REGION = os.getenv("AWS_REGION", "ap-southeast-3")
+BEDROCK_TIMEOUT = float(os.getenv("BEDROCK_TIMEOUT", "120"))
+
+# Azure AD / Entra ID (IdP for STS AssumeRoleWithWebIdentity)
+AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "")
+AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "")
+AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
+
+# AWS role chaining: Entra token → bridge role → target role (Bedrock access)
+AWS_ROLE_ARN_BRIDGE = os.getenv("AWS_ROLE_ARN_BRIDGE", "")
+AWS_ROLE_ARN_TARGET = os.getenv("AWS_ROLE_ARN_TARGET", "")
+
 # Confluence (only used when SETTINGS["confluence_fallback"]["enabled"] is True)
 CONFLUENCE_BASE_URL = os.getenv("CONFLUENCE_BASE_URL", "https://confluence.bri.co.id")
 # Faithful to production ConfluenceConfig: prefer PAT, then CONFLUENCE_PAT.

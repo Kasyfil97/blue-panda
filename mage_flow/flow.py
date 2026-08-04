@@ -16,7 +16,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config
-from .clients import BM25Client, LLMClient
+from .clients import BM25Client, BedrockLLMClient, LLMClient
 from .common import ai_prefix, is_missing_desc, norm
 from .confluence import ConfluenceDiscoveryRequest, ConfluenceDiscoveryResponse, ConfluenceDiscoveryService
 from .llm_generation import LLMGeneration
@@ -282,6 +282,7 @@ def process_column(
     bm25: BM25Client, llm: LLMGeneration, sampling_params: Dict[str, Any], bm25_params: Dict[str, Any],
     settings: Dict[str, Any], force_generate: bool, request_id: Optional[str] = None,
     bt_enabled: bool = False, bt_sampling_params: Optional[Dict[str, Any]] = None,
+    force_bt: bool = False,
     temporary_knowledge_by_column: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> str:
     """Process a SINGLE column via the resolver chain. Mutates ``column`` in place."""
@@ -291,8 +292,8 @@ def process_column(
 
     if not force_generate and not is_missing_desc(column.get("ColumnDescription")):
         logger.info("[chain] %s: description already present -> skip resolver chain", col_name)
-        # Description exists — generate a business title only if enabled & missing.
-        if bt_enabled and is_missing_desc(column.get("ColumnBusinessTitle")):
+        # Description exists — generate a business title if enabled and missing (or force_bt).
+        if bt_enabled and (force_bt or is_missing_desc(column.get("ColumnBusinessTitle"))):
             try:
                 bt = _generate_business_title(
                     table_name=table_name, col_name=col_name,
@@ -345,6 +346,7 @@ def generate_metadata(
     table: Dict[str, Any],
     *,
     force_generate: bool = False,
+    force_bt: bool = False,
     settings: Optional[Dict[str, Any]] = None,
     bm25: Optional[BM25Client] = None,
     llm: Optional[LLMGeneration] = None,
@@ -370,8 +372,10 @@ def generate_metadata(
     if not force_generate:
         _, meta_err = metadata_validation(validated_table)
         if meta_err == "semua kolom telah memiliki deskripsi":
-            bt_pending = bt_enabled and any(
-                is_missing_desc(c.get("ColumnBusinessTitle")) for c in validated_table.get("Columns", [])
+            bt_pending = bt_enabled and (
+                force_bt or any(
+                    is_missing_desc(c.get("ColumnBusinessTitle")) for c in validated_table.get("Columns", [])
+                )
             )
             if not (bt_pending or table_description_needs_generation):
                 raise NoGenerationNeeded(meta_err)
@@ -389,7 +393,7 @@ def generate_metadata(
 
     request_id = str(uuid.uuid4())
     bm25 = bm25 or BM25Client()
-    llm = llm or LLMGeneration(LLMClient())
+    llm = llm or LLMGeneration(BedrockLLMClient())
 
     logger.info("[flow] === table=%s force=%s request_id=%s ===", table_name, force_generate, request_id)
 
@@ -460,7 +464,8 @@ def generate_metadata(
                 table_name=table_name, column=col, system_context=system_context, table_hits=table_hits,
                 bm25=bm25, llm=llm, sampling_params=sampling_params, bm25_params=bm25_params, settings=settings,
                 force_generate=force_generate, request_id=request_id, bt_enabled=bt_enabled,
-                bt_sampling_params=bt_sampling_params, temporary_knowledge_by_column=temporary_knowledge_by_column,
+                bt_sampling_params=bt_sampling_params, force_bt=force_bt,
+                temporary_knowledge_by_column=temporary_knowledge_by_column,
             )
             outcomes.append({"column_name": col_name, "status": "ok", "resolution": resolution or "none"})
         except Exception as exc:
