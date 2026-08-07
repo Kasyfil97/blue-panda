@@ -423,6 +423,14 @@ class BM25Client:
         data = self._post("/api/v1/terms/context", {"col_name": col_name}, request_id or str(uuid.uuid4()))
         return data.get("context", []) if data else []
 
+    def get_table_term_context(
+        self,
+        table_name: str,
+        request_id: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        data = self._post("/api/v1/tables/term-context", {"table_name": table_name}, request_id or str(uuid.uuid4()))
+        return data.get("context", []) if data else []
+
     def add_unknown_terms(
         self,
         terms: List[str],

@@ -35,10 +35,12 @@ class LLMGeneration:
         col_name: str,
         system_context: str,
         term_knowledge: Any = None,
+        table_term_knowledge: Any = None,
         sampling_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         prompt = prompts.PROMPT_HYPOTHESIS.format(
             system_context=system_context or "",
+            table_term_knowledge=_json_or_empty(table_term_knowledge),
             term_knowledge=_json_or_empty(term_knowledge),
         )
         messages = [
@@ -53,11 +55,13 @@ class LLMGeneration:
         col_name: str,
         system_context: str,
         abbr_context: Any,
+        table_term_knowledge: Any = None,
         sampling_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         prompt = prompts.PROMPT_UNDERSTANDING_CHECK.format(
             system_context=system_context or "",
             abbr_context=json.dumps(abbr_context, ensure_ascii=False, indent=2),
+            table_term_knowledge=_json_or_empty(table_term_knowledge),
         )
         messages = [
             {"role": "system", "content": prompt},
@@ -72,11 +76,13 @@ class LLMGeneration:
         system_context: str,
         col_knowledge: Any,
         term_knowledge: Any,
+        table_term_knowledge: Any = None,
         sampling_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         prompt = prompts.PROMPT_COL_DESC_GENERATE.format(
             table_name=table_name,
             system_context=system_context or "",
+            table_term_knowledge=_json_or_empty(table_term_knowledge),
             col_knowledge=_json_or_empty(col_knowledge),
             term_knowledge=_json_or_empty(term_knowledge),
         )

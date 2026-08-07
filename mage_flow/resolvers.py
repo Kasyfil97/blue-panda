@@ -64,6 +64,9 @@ class ResolverContext:
     settings: Dict[str, Any]
     request_id: Optional[str] = None
     temporary_knowledge_by_column: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    #: Table-level term context (istilah tabel), fetched once per table in the flow
+    #: and shared across all columns. Prepended to the per-column abbreviation context.
+    table_term_context: List[Dict[str, str]] = field(default_factory=list)
 
     _hypothesis: Optional[str] = field(default=None, repr=False)
     _abbr_context: Optional[Any] = field(default=None, repr=False)
@@ -81,14 +84,27 @@ class ResolverContext:
 
     def _load_lazy(self) -> None:
         logger.info("[context] %s: fetch abbreviation context (BM25 /terms/context)", self.col_name)
+        # Column abbreviations stay their own context; table term knowledge (istilah
+        # tabel) is kept SEPARATE and passed to the LLM under its own labeled section
+        # so the model knows it describes the whole table's domain, not a column token.
         self._abbr_context = self.bm25.get_abbreviation_context(self.col_name, request_id=self.request_id)
-        logger.info("[context] %s: abbreviation terms=%d", self.col_name, len(self._abbr_context or []))
+        if self.table_term_context:
+            codes = [c for entry in self.table_term_context for c in entry.keys()]
+            logger.info(
+                "[context] %s: table term knowledge (istilah tabel) codes=%s -> passed to LLM as table domain context",
+                self.col_name, codes,
+            )
+        logger.info(
+            "[context] %s: term knowledge column_abbr=%d table_terms=%d",
+            self.col_name, len(self._abbr_context or []), len(self.table_term_context or []),
+        )
         logger.info("[context] %s: generate hypothesis (LLM col_desc_hypothesis)", self.col_name)
         hypothesis_out = self.llm.col_desc_hypothesis(
             table_name=self.table_name,
             col_name=self.col_name,
             system_context=self.system_context,
             term_knowledge=self._abbr_context,
+            table_term_knowledge=self.table_term_context,
             sampling_params=self.sampling_params,
         )
         self._hypothesis = norm(hypothesis_out.get("ColumnDescription"))
@@ -205,8 +221,10 @@ class BM25Resolver(BaseResolver):
         out = ctx.llm.col_desc_generate(
             table_name=ctx.table_name,
             col_name=ctx.col_name,
+            system_context=ctx.system_context,
             col_knowledge=col_knowledges,
             term_knowledge=abbr_context,
+            table_term_knowledge=ctx.table_term_context,
             sampling_params=ctx.sampling_params,
         )
         description = ai_prefix(out.get("ColumnDescription"))
@@ -396,6 +414,7 @@ class PureLLMResolver(BaseResolver):
                 col_name=ctx.col_name,
                 system_context=ctx.system_context,
                 abbr_context=abbr_context,
+                table_term_knowledge=ctx.table_term_context,
                 sampling_params=ctx.sampling_params,
             )
             if not chk.get("understood", False):
@@ -413,6 +432,7 @@ class PureLLMResolver(BaseResolver):
             system_context=ctx.system_context,
             col_knowledge="",
             term_knowledge=abbr_context,
+            table_term_knowledge=ctx.table_term_context,
             sampling_params=ctx.sampling_params,
         )
         description = ai_prefix(out.get("ColumnDescription"))

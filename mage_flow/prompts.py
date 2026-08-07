@@ -15,6 +15,11 @@ Additional hint:
 Information context for the system (optional, may be empty):
 {system_context}
 
+Table term knowledge (istilah tabel, may be empty):
+- This is the meaning of a code embedded in the TABLE NAME (usually its last term) that indicates what the whole table is about, e.g. loan (pinjaman), deposit/savings (simpanan), or investment (investasi).
+- Treat it as the authoritative subject/domain of the table and interpret the column within that domain.
+{table_term_knowledge}
+
 Abbreviation / term knowledge (may be empty):
 {term_knowledge}
 
@@ -23,6 +28,7 @@ Rules:
 - Be concise: 1 sentence only.
 - Do not assume sensitive or personal data unless clearly implied by the names.
 - If term knowledge is provided, use it to expand abbreviations safely.
+- If table term knowledge is provided, use it to anchor the table's business domain.
 - If ambiguous, choose the most general plausible meaning.
 - Do not mention that this is a hypothesis; just provide the description.
 - If you do not understand the column name at all, return an empty string.
@@ -48,12 +54,17 @@ INPUT:
 - You will also receive:
   - ABBREVIATION CONTEXT (term -> definition), may be empty
   - SYSTEM CONTEXT (banking system description), may be empty
+  - TABLE TERM KNOWLEDGE (istilah tabel), may be empty
 
 ABBREVIATION CONTEXT:
 {abbr_context}
 
 SYSTEM CONTEXT:
 {system_context}
+
+TABLE TERM KNOWLEDGE (istilah tabel):
+- Meaning of a code in the TABLE NAME describing the table's overall subject/domain (e.g. loan, deposit, investment).
+{table_term_knowledge}
 
 TASK:
 Decide whether the column meaning is understandable enough to safely generate a description.
@@ -75,6 +86,7 @@ RULES:
   date, dt, time, tm, timestamp, ts, amt, amount, cnt, count, bal, balance, status, stat, type, typ,
   yr, year, mo, month, day.
 - Treat any term present in ABBREVIATION CONTEXT with a non-empty definition as KNOWN.
+- Treat TABLE TERM KNOWLEDGE (istilah tabel) as the known subject/domain of the table; use it to interpret domain-specific tokens, and treat any code present there as KNOWN.
 - If a token looks like a system-specific code and is not explained, mark it UNKNOWN.
 - Prefer understood=false over guessing if confidence is low.
 
@@ -111,6 +123,8 @@ Use every available signal:
 
 - Schema name
 - Table name
+- System context — the source system's business domain (e.g. brispot -> loan/credit)
+- Table term knowledge (istilah tabel) — the meaning of the code in the table name that states the table's subject (e.g. loan/deposit/investment); use this as the PRIMARY anchor for the table's business domain
 - Table summary
 - Column name
 - Hypothesis
@@ -211,8 +225,11 @@ INPUTS
 Table Name:
 {table_name}
 
-Table Context Summary:
+System Context (business domain of the source system; may be empty):
 {system_context}
+
+Table Term Knowledge (istilah tabel — meaning of the code in the table name that states the table's subject/domain, e.g. loan/deposit/investment; may be empty):
+{table_term_knowledge}
 
 column Knowledge:
 {col_knowledge}

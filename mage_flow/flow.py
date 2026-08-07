@@ -284,6 +284,7 @@ def process_column(
     bt_enabled: bool = False, bt_sampling_params: Optional[Dict[str, Any]] = None,
     force_bt: bool = False,
     temporary_knowledge_by_column: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    table_term_context: Optional[List[Dict[str, str]]] = None,
 ) -> str:
     """Process a SINGLE column via the resolver chain. Mutates ``column`` in place."""
     col_name = norm(column.get("ColumnName"))
@@ -311,6 +312,7 @@ def process_column(
         table_name=table_name, col_name=col_name, system_context=system_context, table_hits=table_hits,
         bm25=bm25, llm=llm, sampling_params=sampling_params, bm25_params=bm25_params, settings=settings,
         request_id=request_id, temporary_knowledge_by_column=temporary_knowledge_by_column or {},
+        table_term_context=table_term_context or [],
     )
 
     logger.info("[chain] %s: start resolver chain (force=%s)", col_name, force_generate)
@@ -406,6 +408,22 @@ def generate_metadata(
     system_context = system_payload.get("context", "")
     logger.info("[flow] system=%s context_len=%d", system_name, len(system_context or ""))
 
+    # ---- Table-level term context (istilah tabel, e.g. 'ddyp2a') ----
+    # Fetched once per table (like system context) and reused across all columns.
+    logger.info("[flow] === STEP: table term knowledge (istilah tabel) ===")
+    logger.info("[flow] table_term: fetch from BM25 /tables/term-context (table=%s)", table_name)
+    table_term_context = bm25.get_table_term_context(table_name, request_id=request_id)
+    if table_term_context:
+        for entry in table_term_context:
+            for code, meaning in entry.items():
+                logger.info("[flow] table_term: MATCH code=%r -> %s", code, norm(meaning) or "(no description)")
+        logger.info(
+            "[flow] table_term: %d code(s) found -> will be injected as extra context for every column",
+            len(table_term_context),
+        )
+    else:
+        logger.info("[flow] table_term: no code in table name matched the dictionary -> no extra context")
+
     # ---- 1. Table search ----
     logger.info("[flow] BM25 table search (top_k=%s threshold=%s)", bm25_params["table"]["top_k"], bm25_params["table"]["threshold"])
     table_hits = bm25.get_table_knowledge(
@@ -466,6 +484,7 @@ def generate_metadata(
                 force_generate=force_generate, request_id=request_id, bt_enabled=bt_enabled,
                 bt_sampling_params=bt_sampling_params, force_bt=force_bt,
                 temporary_knowledge_by_column=temporary_knowledge_by_column,
+                table_term_context=table_term_context,
             )
             outcomes.append({"column_name": col_name, "status": "ok", "resolution": resolution or "none"})
         except Exception as exc:
