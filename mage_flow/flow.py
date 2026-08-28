@@ -241,7 +241,8 @@ def _generate_table_description(
     out = llm.table_desc_generate(
         table_name=table_name, system_context=system_context,
         table_knowledge=_format_table_knowledge(table_hits),
-        columns=_compact_columns_for_table_description(columns), sampling_params=sampling_params,
+        columns=_compact_columns_for_table_description(columns), 
+        sampling_params=sampling_params,
     )
     return ai_prefix(out.get("TableDescription"))
 
@@ -411,7 +412,6 @@ def generate_metadata(
     # ---- Table-level term context (istilah tabel, e.g. 'ddyp2a') ----
     # Fetched once per table (like system context) and reused across all columns.
     logger.info("[flow] === STEP: table term knowledge (istilah tabel) ===")
-    logger.info("[flow] table_term: fetch from BM25 /tables/term-context (table=%s)", table_name)
     table_term_context = bm25.get_table_term_context(table_name, request_id=request_id)
     if table_term_context:
         for entry in table_term_context:

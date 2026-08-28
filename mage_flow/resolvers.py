@@ -1,12 +1,13 @@
 """The resolver chain — synchronous port of src/services/resolvers/*.
 
-Chain order (same as production _RESOLVER_CHAIN):
-  1. ExactMatchResolver   (AS400 priority)      -> exact_as400  (covers confluence too)
-  2. BM25Resolver         (AS400 + Confluence)  -> bm25_as400_confluence
+Chain order (experiment 5):
+  1. ExactMatchResolver   (AS400 priority)      -> exact_as400
+  2. BM25Resolver         (AS400 sources)       -> bm25_as400   (only for AS400/AS4 tables)
   3. KataEvidenceResolver                        -> kata_technical_relation | kata_alias
-  4. BM25Resolver         (Informatica cert.)   -> bm25_informatica_certified
-  5. ConfluenceFallbackResolver                  -> confluence_fallback
-  6. PureLLMResolver                             -> llm | unknown
+  4. BM25Resolver         (Confluence sources)  -> bm25_confluence
+  5. BM25Resolver         (Informatica cert.)   -> bm25_informatica_certified
+  6. ConfluenceFallbackResolver                  -> confluence_fallback
+  7. PureLLMResolver                             -> llm | unknown
 
 Each resolver is a small class with .resolve(ctx) -> ResolverResult. The first
 one that returns resolved=True wins.
@@ -15,6 +16,7 @@ one that returns resolved=True wins.
 from __future__ import annotations
 
 import logging
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
@@ -181,11 +183,15 @@ class BM25Resolver(BaseResolver):
         allowed_priorities: Optional[Set[int]] = None,
         source_types: Optional[List[str]] = None,
         source_types_selector=None,
+        run_if=None,
         resolution_tag: str = "llm",
     ) -> None:
         self.allowed_priorities = frozenset(allowed_priorities) if allowed_priorities else None
         self.source_types = list(source_types) if source_types else None
         self.source_types_selector = source_types_selector
+        #: Optional predicate ``ctx -> bool``. When it returns False the resolver is
+        #: skipped entirely (no BM25 call), e.g. AS400 sources on a non-AS400 table.
+        self.run_if = run_if
         self.resolution_tag = resolution_tag
 
     def _get_source_types(self, table_name: str) -> Optional[List[str]]:
@@ -198,6 +204,13 @@ class BM25Resolver(BaseResolver):
         return "bm25"
 
     def resolve(self, ctx: ResolverContext) -> ResolverResult:
+        if self.run_if is not None and not self.run_if(ctx):
+            logger.info(
+                "[bm25:%s] %s.%s: run_if predicate False -> skip (no BM25 call)",
+                self.resolution_tag, ctx.table_name, ctx.col_name,
+            )
+            return ResolverResult(False, "bm25")
+
         term_cfg = ctx.bm25_params.get("term", {})
         global_cfg = ctx.bm25_params.get("global", {})
 
@@ -444,11 +457,20 @@ class PureLLMResolver(BaseResolver):
 # The chain (same order + priorities as production _RESOLVER_CHAIN)
 # ---------------------------------------------------------------------------
 
-def _as400_confluence_source_types(table_name: str) -> List[str]:
-    """Route to AS400 sources for tables whose name contains 'as4', else Confluence."""
-    if "as4" in norm(table_name).lower():
-        return ["as400", "as_400", "as-400", "kamus as400"]
-    return ["confluence"]
+_AS400_SOURCE_TYPES = ["as400", "as_400", "as-400", "kamus as400"]
+
+#: Tokens in a (schema-qualified) table name that mark it as an AS400 table.
+_AS400_TABLE_TOKENS = frozenset({"as400", "as4"})
+
+
+def _is_as400_table(table_name: str) -> bool:
+    """True when the table originates from AS400.
+
+    Detected by an ``as400`` / ``as4`` token in the table name (e.g. ``AS4_CUSTOMER``,
+    ``AS400.FOO``) — the same source-system convention used elsewhere in the flow.
+    """
+    tokens = re.split(r"[^a-z0-9]+", norm(table_name).lower())
+    return any(token in _AS400_TABLE_TOKENS for token in tokens)
 
 
 def build_resolver_chain() -> List[BaseResolver]:
@@ -456,10 +478,16 @@ def build_resolver_chain() -> List[BaseResolver]:
         ExactMatchResolver(allowed_priorities={KNOWLEDGE_PRIORITY_AS400}, resolution_tag="exact_as400"),
         BM25Resolver(
             allowed_priorities=None,
-            source_types_selector=_as400_confluence_source_types,
-            resolution_tag="bm25_as400_confluence",
+            source_types=_AS400_SOURCE_TYPES,
+            run_if=lambda ctx: _is_as400_table(ctx.table_name),
+            resolution_tag="bm25_as400",
         ),
         KataEvidenceResolver(),
+        BM25Resolver(
+            allowed_priorities=None,
+            source_types=["confluence"],
+            resolution_tag="bm25_confluence",
+        ),
         BM25Resolver(
             allowed_priorities={KNOWLEDGE_PRIORITY_INFORMATICA_CERTIFIED},
             source_types=["informatica"],

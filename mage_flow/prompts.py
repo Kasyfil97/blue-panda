@@ -305,10 +305,16 @@ INPUTS:
 - System context (optional): {system_context}
 
 GUIDELINES:
-- The business title should be a concise label (2-6 words) in Indonesian.
-- It should describe WHAT the column represents in business terms.
-- Do not repeat the column name verbatim; translate it into human-friendly phrasing.
-- Use title case (capitalize each word).
+- Derive the business title primarily from the COLUMN DESCRIPTION; use the column name only as a supporting signal.
+- Structure the title as: [value type] + [primary entity], e.g. "Kode Referensi Mata Uang", "Kode Referensi Produk", "Id Transaksi".
+  - value type = the kind of value the column holds (e.g. Kode, Kode Referensi, Id, Nomor, Tanggal, Nama, Saldo, Jumlah, Status, Flag).
+  - primary entity = the DIRECT OBJECT of the identifying/storing verb in the description (e.g. what is being "diidentifikasi" or "disimpan").
+- Focus on the primary entity only. IGNORE relational/qualifier clauses such as "yang terkait dengan ...", "dalam suatu ...", "yang terjadi pada ...". These describe context, not the title's subject.
+  - Example: "Kode referensi untuk mengidentifikasi mata uang yang terkait dengan suatu produk" -> "Kode Referensi Mata Uang" (NOT "... Produk").
+  - Example: "Kode referensi untuk mengidentifikasi produk yang terkait dengan suatu mata uang" -> "Kode Referensi Produk" (NOT "... Mata Uang").
+- The business title should be a concise label (2-4 words) in Indonesian.
+- Do not repeat the column name verbatim; translate technical tokens into human-friendly business phrasing.
+- Use title case: capitalize the first letter of EVERY word, including short tokens like "Id".
 - If the column meaning is unclear, return an empty string.
 
 OUTPUT FORMAT (STRICT JSON ONLY):
