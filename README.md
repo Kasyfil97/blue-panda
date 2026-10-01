@@ -2,7 +2,7 @@
 
 ## Overview
 
-Complete workflow untuk fetch, process, dan enhance metadata table dari BRI API, dengan AI-powered column description generation.
+Complete workflow untuk fetch, process, dan enhance metadata table dari *** API, dengan AI-powered column description generation.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ Complete workflow untuk fetch, process, dan enhance metadata table dari BRI API,
 
 ┌──────────────────────┐
 │   API Metadata       │
-│   (BRI MAGE API)     │
+│   (MAGE API)     │
 └──────────┬───────────┘
            │
            │ fetch_table_metadata.py
