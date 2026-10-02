@@ -35,9 +35,12 @@ BASE_DIR = Path(__file__).parent
 
 # Module-level load_dotenv calls inside each module handle credential loading.
 from mage_flow import default_settings, generate_column             # noqa: E402
-from mage_flow.clients import BedrockLLMClient                      # noqa: E402
+# NOTE: was `from mage_flow.clients import BedrockLLMClient` — hardcoded Bedrock
+# regardless of the LLM_PROVIDER env var. get_llm_client() respects
+# LLM_PROVIDER=bedrock/ollama/llama from .env instead.
+from mage_flow.clients import get_llm_client                        # noqa: E402
 from mage_flow.llm_generation import LLMGeneration                  # noqa: E402
-from evaluate_column_description import evaluate_all                 # noqa: E402
+from evaluate_column_description import evaluate_all, build_summary  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config
@@ -48,15 +51,20 @@ CHECKPOINT_FILE = BASE_DIR / "data_test_checkpoint.xlsx"
 
 TABLE_COL     = "Tabel"
 COLUMN_COL    = "Kolom"
-PREDICTED_COL = "Predicted Column Description"   # inference target (unchanged)
-REFERENCE_COL = "Column Description"             # inference-side ground truth (unchanged)
+PREDICTED_COL = "Predicted Column Description"   # inference target
 RESOLVER_COL  = "Resolver"
 KNOWLEDGE_COL = "BM25 Retrieved Knowledge"
-EVAL_COL      = "LLM Evaluation"
 
-# Evaluation targets — what the LLM judge scores. Set to the business-title pair.
-EVAL_REFERENCE_COL = "Business Title"            # ground truth
-EVAL_PREDICTED_COL = "Predicted Business Title"  # prediction
+PREDICTED_TITLE_COL = "Predicted Business Title"
+
+# --- Ground-truth columns (eval6 / data_test_new.xlsx format) ---
+# NOTE: was "Column Description" / "Business Title" (old data_test.xlsx
+# format) — renamed to match the current dataset's actual header names.
+DESC_REFERENCE_COL  = "gt column description"
+DESC_EVAL_COL       = "LLM Evaluation (Column Description)"
+
+TITLE_REFERENCE_COL = "gt business title"
+TITLE_EVAL_COL      = "LLM Evaluation (Business Title)"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -102,24 +110,6 @@ def _load_checkpoint(df: pd.DataFrame, checkpoint_file: Path = CHECKPOINT_FILE) 
     return df
 
 
-def _build_summary(labels: list[str], total: int) -> pd.DataFrame:
-    label_order = ["similar", "partial", "unsimilar", "fallback", "error"]
-    series = pd.Series(labels)
-    fallback_count = int((series == "fallback").sum())
-    evaluated_total = total - fallback_count
-
-    counts = series.value_counts().reindex(label_order, fill_value=0)
-    rows = []
-    for label in label_order:
-        count = int(counts[label])
-        denom = evaluated_total if label in ("similar", "partial", "unsimilar") else total
-        denom = denom if denom > 0 else 1
-        rows.append({"Label": label, "Count": count, "Percentage": f"{count / denom * 100:.2f}%"})
-    rows.append({"Label": "Evaluated Total", "Count": evaluated_total, "Percentage": "100.00%"})
-    rows.append({"Label": "Grand Total",     "Count": total,           "Percentage": "100.00%"})
-    return pd.DataFrame(rows)
-
-
 # ---------------------------------------------------------------------------
 # Step 1: Inference
 # ---------------------------------------------------------------------------
@@ -140,7 +130,7 @@ def _infer_row(i: int, table_name: str, col_name: str, settings: dict, llm: LLMG
 
 def run_inference(df: pd.DataFrame, force: bool = False, workers: int = 1, checkpoint_file: Path = CHECKPOINT_FILE) -> pd.DataFrame:
     """Call generate_column_description for each row with a missing prediction."""
-    for col in (PREDICTED_COL, EVAL_PREDICTED_COL, RESOLVER_COL, KNOWLEDGE_COL):
+    for col in (PREDICTED_COL, PREDICTED_TITLE_COL, RESOLVER_COL, KNOWLEDGE_COL):
         if col not in df.columns:
             df[col] = ""
         # Ensure object dtype so string assignment doesn't raise TypeError
@@ -161,7 +151,7 @@ def run_inference(df: pd.DataFrame, force: bool = False, workers: int = 1, check
     settings = default_settings()
     settings["business_title"]["enabled"] = True   # force-generate business title per row
     # Single shared LLM client — avoids re-authenticating OIDC per row.
-    llm = LLMGeneration(BedrockLLMClient())
+    llm = LLMGeneration(get_llm_client())
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
@@ -174,7 +164,7 @@ def run_inference(df: pd.DataFrame, force: bool = False, workers: int = 1, check
                 i, desc, bt, resolver, knowledge = future.result()
                 with _df_lock:
                     df.at[i, PREDICTED_COL]    = desc
-                    df.at[i, EVAL_PREDICTED_COL] = bt
+                    df.at[i, PREDICTED_TITLE_COL] = bt
                     df.at[i, RESOLVER_COL]     = resolver
                     df.at[i, KNOWLEDGE_COL]    = knowledge
                     df.to_excel(checkpoint_file, index=False)
@@ -189,25 +179,27 @@ def run_inference(df: pd.DataFrame, force: bool = False, workers: int = 1, check
 # ---------------------------------------------------------------------------
 
 def run_evaluation(df: pd.DataFrame) -> pd.DataFrame:
-    """Score business-title predictions via LLM judge (evaluate_all from evaluate_column_description)."""
-    # missing = [c for c in (EVAL_REFERENCE_COL, EVAL_PREDICTED_COL) if c not in df.columns]
-    # missing = [c for c in (EVAL_RERENCE_COL, EVAL_PREDICTED_COL) if c not in df.columns]
-    # if missing:
-    #     raise ValueError(f"Evaluation requires columns: {missing}")
+    """Score BOTH Column Description and Business Title predictions against
+    their real ground-truth columns (previously this only scored Business
+    Title, via a column-renaming hack that fed it through evaluate_all()
+    disguised as 'Column Description' -- Column Description itself was never
+    actually evaluated)."""
+    required = [DESC_REFERENCE_COL, PREDICTED_COL, TITLE_REFERENCE_COL, PREDICTED_TITLE_COL]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"Evaluation requires columns: {missing}. Found: {list(df.columns)}")
 
-    # evaluate_all reads hardcoded 'Column Description'/'Predicted Column Description'
-    # columns, so map the business-title pair onto those names. It also expects a
-    # zero-based sequential index for results assignment.
-    eval_df = (
-        df[[EVAL_REFERENCE_COL, EVAL_PREDICTED_COL]]
-        .rename(columns={
-            EVAL_REFERENCE_COL: "Column Description",
-            EVAL_PREDICTED_COL: "Predicted Column Description",
-        })
-        .reset_index(drop=True)
-    )
-    labels = asyncio.run(evaluate_all(eval_df))
-    df[EVAL_COL] = labels
+    async def _run_both() -> tuple[list[str], list[str]]:
+        return await asyncio.gather(
+            evaluate_all(df, DESC_REFERENCE_COL, PREDICTED_COL,
+                         "column descriptions", "column description"),
+            evaluate_all(df, TITLE_REFERENCE_COL, PREDICTED_TITLE_COL,
+                         "business titles", "business title"),
+        )
+
+    desc_labels, title_labels = asyncio.run(_run_both())
+    df[DESC_EVAL_COL] = desc_labels
+    df[TITLE_EVAL_COL] = title_labels
     return df
 
 
@@ -246,18 +238,20 @@ def main() -> None:
         df = run_inference(df, force=args.force, workers=args.workers, checkpoint_file=checkpoint_file)
 
     # Step 2
+    summary = None
     if not args.skip_eval:
         df = run_evaluation(df)
-        labels = list(df[EVAL_COL])
-        summary = _build_summary(labels, len(labels))
+        desc_summary = build_summary(list(df[DESC_EVAL_COL]), "Column Description")
+        title_summary = build_summary(list(df[TITLE_EVAL_COL]), "Business Title")
+        summary = pd.concat([desc_summary, title_summary], ignore_index=True)
         logger.info("Evaluation summary:\n%s", summary.to_string(index=False))
 
     # Write output
     logger.info("Writing results to %s …", output_file)
+    output_file.parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         df.to_excel(writer, sheet_name="Results", index=False)
-        if EVAL_COL in df.columns:
-            summary = _build_summary(list(df[EVAL_COL]), len(df))
+        if summary is not None:
             summary.to_excel(writer, sheet_name="Summary", index=False)
 
     logger.info("Saved %d rows → %s", len(df), output_file)

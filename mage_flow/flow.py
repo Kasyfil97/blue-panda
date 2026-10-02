@@ -16,7 +16,7 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import config
-from .clients import BM25Client, BedrockLLMClient, LLMClient
+from .clients import BM25Client, get_llm_client
 from .common import ai_prefix, is_missing_desc, norm
 from .confluence import ConfluenceDiscoveryRequest, ConfluenceDiscoveryResponse, ConfluenceDiscoveryService
 from .llm_generation import LLMGeneration
@@ -396,7 +396,10 @@ def generate_metadata(
 
     request_id = str(uuid.uuid4())
     bm25 = bm25 or BM25Client()
-    llm = llm or LLMGeneration(BedrockLLMClient())
+    # NOTE: was `LLMGeneration(BedrockLLMClient())` — always used Bedrock/GPT OSS
+    # regardless of the LLM_PROVIDER env var. get_llm_client() respects
+    # LLM_PROVIDER=bedrock/ollama/llama from .env instead (see clients.py).
+    llm = llm or LLMGeneration(get_llm_client())
 
     logger.info("[flow] === table=%s force=%s request_id=%s ===", table_name, force_generate, request_id)
 

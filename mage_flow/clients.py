@@ -283,6 +283,113 @@ class BedrockLLMClient:
 
 
 # ---------------------------------------------------------------------------
+# Ollama client (Qwen3, or any locally-served Ollama model)
+# ---------------------------------------------------------------------------
+
+import os as _os  # local alias — avoids clashing with any module-level `os` import elsewhere
+
+_QWEN_THINKING_TAG_RE = re.compile(r"<(think|thinking|reasoning)\b[^>]*>[\s\S]*?</\1\s*>", re.IGNORECASE)
+_QWEN_PLAIN_THINKING_RE = re.compile(
+    r"^\s*Thinking\.\.\.[\s\S]*?\.\.\.\s*done\s+thinking\.\s*", re.IGNORECASE,
+)
+
+
+class OllamaLLMClient:
+    """Drop-in replacement for LLMClient/BedrockLLMClient, backed by a local
+    Ollama server (e.g. Qwen3). Same interface: create_response(messages,
+    sampling_params, retries) -> str.
+
+    Reads OLLAMA_BASE_URL / OLLAMA_MODEL / OLLAMA_TIMEOUT / OLLAMA_THINK
+    directly from the environment (not via mage_flow.config), so this works
+    regardless of whether config.py has been updated with Ollama-specific
+    settings yet.
+    """
+
+    def __init__(
+        self,
+        base_url: Optional[str] = None,
+        model: Optional[str] = None,
+        timeout: Optional[float] = None,
+        think: Optional[bool] = None,
+    ) -> None:
+        self.base_url = (base_url or _os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+        self.model = model or _os.getenv("OLLAMA_MODEL", "qwen3:14b")
+        self.timeout = timeout if timeout is not None else float(_os.getenv("OLLAMA_TIMEOUT", "180"))
+        if think is None:
+            think = _os.getenv("OLLAMA_THINK", "false").strip().lower() in {"1", "true", "yes", "y"}
+        self.think = think
+        self.session = requests.Session()
+
+    @staticmethod
+    def _strip_thinking(text: str) -> str:
+        """Handles both XML-tag reasoning (<think>...</think>) and Qwen's
+        plain-text 'Thinking... ... done thinking.' format."""
+        cleaned = _QWEN_THINKING_TAG_RE.sub("", text)
+        cleaned = _QWEN_PLAIN_THINKING_RE.sub("", cleaned)
+        return cleaned.strip()
+
+    def create_response(
+        self,
+        messages: List[Dict[str, str]],
+        sampling_params: Optional[Dict[str, Any]] = None,
+        retries: int = 3,
+    ) -> str:
+        sampling_params = sampling_params or {}
+        url = f"{self.base_url}/api/chat"
+        body: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "stream": False,
+            "think": self.think,
+            "options": {
+                "temperature": sampling_params.get("temperature", 0.1),
+                "top_p": sampling_params.get("top_p", 0.9),
+                "num_predict": sampling_params.get("max_tokens", 1200),
+            },
+        }
+
+        delay = 1.0
+        last_error: Optional[str] = None
+        for attempt in range(1, retries + 1):
+            try:
+                resp = self.session.post(url, json=body, timeout=self.timeout)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    message = data.get("message", {}) or {}
+                    content = message.get("content", "") or ""
+                    if not content.strip() and message.get("thinking"):
+                        content = message["thinking"]
+                    return self._strip_thinking(content)
+                last_error = f"status={resp.status_code} body={resp.text[:300]}"
+                print(f"  [Ollama] attempt {attempt} status={resp.status_code}", file=sys.stderr)
+            except requests.RequestException as exc:
+                last_error = str(exc)
+                print(f"  [Ollama] attempt {attempt} error: {exc}", file=sys.stderr)
+
+            if attempt < retries:
+                time.sleep(delay)
+                delay = min(delay * 2, 8)
+
+        raise RuntimeError(
+            f"Ollama call failed after {retries} attempts ({last_error}). "
+            f"Check that Ollama is running and the model '{self.model}' is pulled (ollama list)."
+        )
+
+
+def get_llm_client():
+    """Factory: returns a client based on the LLM_PROVIDER env var
+    ('bedrock' | 'ollama' | 'llama'). Defaults to 'bedrock' to match this
+    codebase's existing default behavior (BedrockLLMClient was previously
+    hardcoded everywhere)."""
+    provider = _os.getenv("LLM_PROVIDER", "bedrock").strip().lower()
+    if provider == "ollama":
+        return OllamaLLMClient()
+    if provider in ("llama", "llm"):
+        return LLMClient()
+    return BedrockLLMClient()
+
+
+# ---------------------------------------------------------------------------
 # BM25 service client
 # ---------------------------------------------------------------------------
 
