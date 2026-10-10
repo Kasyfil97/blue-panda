@@ -10,7 +10,7 @@ import json
 from typing import Any, Dict, Optional
 
 from . import prompts
-from .clients import BedrockLLMClient, LLMClient
+from .clients import LLMClient, get_llm_client
 from .common import parse_llm_output
 
 
@@ -20,7 +20,10 @@ def _json_or_empty(value: Any) -> str:
 
 class LLMGeneration:
     def __init__(self, client: Optional[LLMClient] = None) -> None:
-        self.client = client or BedrockLLMClient()
+        # NOTE: was `client or BedrockLLMClient()` — always used Bedrock/GPT OSS
+        # regardless of the LLM_PROVIDER env var. get_llm_client() respects
+        # LLM_PROVIDER=bedrock/ollama/llama from .env instead (see clients.py).
+        self.client = client or get_llm_client()
 
     def _run(self, messages, sampling_params) -> Dict[str, Any]:
         raw = self.client.create_response(messages=messages, sampling_params=sampling_params)

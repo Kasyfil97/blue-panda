@@ -71,24 +71,24 @@ logger = logging.getLogger(__name__)
 # Prompt
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = """\
-You are a semantic similarity evaluator for database column descriptions.
+SYSTEM_PROMPT_TEMPLATE = """\
+You are a semantic similarity evaluator for database {field_label}.
 
-Your task is to compare a reference "Column Description" with a "Predicted Column Description"
+Your task is to compare a reference "{reference_label}" with a "{predicted_label}"
 and determine how closely their meanings are related.
 
 Classification rules
 --------------------
-similar   – The predicted description has the same meaning as the reference,
+similar   – The predicted {field_label_singular} has the same meaning as the reference,
             or is semantically related to it. Differences in wording,
             language (Indonesian vs English), or level of detail are acceptable
             as long as they describe the same concept or have a semantic correlation.
 
-partial   – The predicted description has only a limited semantic correlation
+partial   – The predicted {field_label_singular} has only a limited semantic correlation
             with the reference. They share some related aspects or context,
             but the overlap is not strong enough to be considered equivalent.
 
-unsimilar – The predicted description has a meaning that is substantially different
+unsimilar – The predicted {field_label_singular} has a meaning that is substantially different
             from the reference, or the semantic correlation between them is weak
             or nonexistent.
 
@@ -101,15 +101,29 @@ Do not include any explanation, punctuation, or extra text.
 """
 
 USER_TEMPLATE = """\
-Column Description          : {reference}
-Predicted Column Description: {predicted}
+{reference_label}: {reference}
+{predicted_label}: {predicted}
 """
 
 
-def build_messages(reference: str, predicted: str) -> list[dict]:
+def build_messages(
+    reference: str, predicted: str,
+    reference_label: str = "Column Description",
+    predicted_label: str = "Predicted Column Description",
+    field_label: str = "column descriptions",
+    field_label_singular: str = "description",
+) -> list[dict]:
+    system_prompt = SYSTEM_PROMPT_TEMPLATE.format(
+        field_label=field_label,
+        field_label_singular=field_label_singular,
+        reference_label=reference_label,
+        predicted_label=predicted_label,
+    )
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user",   "content": USER_TEMPLATE.format(
+            reference_label=reference_label,
+            predicted_label=predicted_label,
             reference=str(reference).strip(),
             predicted=str(predicted).strip(),
         )},
@@ -126,18 +140,27 @@ async def evaluate_one(
     idx: int,
     reference: str,
     predicted: str,
+    reference_label: str = "Column Description",
+    predicted_label: str = "Predicted Column Description",
+    field_label: str = "column descriptions",
+    field_label_singular: str = "description",
+    deployment: str | None = None,
 ) -> tuple[int, str]:
     """Return (row_index, label) where label ∈ {similar, partial, unsimilar, fallback, error}."""
     if str(predicted).strip().lower() in ("", "none", "-", "nan"):
         return idx, "fallback"
+    if str(reference).strip().lower() in ("", "none", "-", "nan"):
+        return idx, "fallback"
 
-    messages = build_messages(reference, predicted)
+    messages = build_messages(
+        reference, predicted, reference_label, predicted_label, field_label, field_label_singular,
+    )
 
     async with semaphore:
         for attempt in range(1, MAX_RETRIES + 1):
             try:
                 response = await client.chat.completions.create(
-                    model=AZURE_DEPLOYMENT,
+                    model=deployment or AZURE_DEPLOYMENT,
                     messages=messages,
                     temperature=0,
                     max_tokens=10,
@@ -168,7 +191,14 @@ async def evaluate_one(
     return idx, "error"  # unreachable but satisfies type checker
 
 
-async def evaluate_all(df: pd.DataFrame) -> list[str]:
+async def evaluate_all(
+    df: pd.DataFrame,
+    reference_col: str = "Column Description",
+    predicted_col: str = "Predicted Column Description",
+    field_label: str = "column descriptions",
+    field_label_singular: str = "description",
+    deployment: str | None = None,
+) -> list[str]:
     if not AZURE_ENDPOINT or not AZURE_API_KEY:
         raise EnvironmentError(
             "Azure OpenAI credentials are missing.\n"
@@ -189,25 +219,53 @@ async def evaluate_all(df: pd.DataFrame) -> list[str]:
         evaluate_one(
             client, semaphore,
             idx=i,
-            reference=row["Column Description"],
-            predicted=row["Predicted Column Description"],
+            reference=row[reference_col],
+            predicted=row[predicted_col],
+            reference_label=reference_col,
+            predicted_label=predicted_col,
+            field_label=field_label,
+            field_label_singular=field_label_singular,
+            deployment=deployment,
         )
         for i, row in df.iterrows()
     ]
 
     logger.info(
-        "Starting evaluation of %d rows with concurrency=%d, deployment=%s",
-        len(df), CONCURRENCY, AZURE_DEPLOYMENT,
+        "Starting evaluation of %d rows for [%s] with concurrency=%d, deployment=%s",
+        len(df), field_label, CONCURRENCY, deployment or AZURE_DEPLOYMENT,
     )
     t0 = time.perf_counter()
 
-    for coro in atqdm(asyncio.as_completed(tasks), total=len(tasks), desc="Evaluating"):
+    for coro in atqdm(asyncio.as_completed(tasks), total=len(tasks), desc=f"Evaluating {field_label}"):
         idx, label = await coro
         results[idx] = label
 
     elapsed = time.perf_counter() - t0
-    logger.info("Done in %.1f s (%.2f rows/s)", elapsed, len(df) / elapsed)
+    logger.info("[%s] done in %.1f s (%.2f rows/s)", field_label, elapsed, len(df) / elapsed)
     return results
+
+
+def build_summary(labels: list[str], dimension_name: str = "Column Description") -> pd.DataFrame:
+    """Build a similar/partial/unsimilar/fallback/error breakdown for one dimension."""
+    label_order = ["similar", "partial", "unsimilar", "fallback", "error"]
+    series = pd.Series(labels)
+    total = len(series)
+    fallback_count = int((series == "fallback").sum())
+    evaluated_total = total - fallback_count
+
+    counts = series.value_counts().reindex(label_order, fill_value=0)
+    rows = []
+    for label in label_order:
+        count = int(counts[label])
+        denom = evaluated_total if label in ("similar", "partial", "unsimilar") else total
+        denom = denom if denom > 0 else 1
+        rows.append({"Dimension": dimension_name, "Label": label, "Count": count,
+                      "Percentage": f"{count / denom * 100:.2f}%"})
+    rows.append({"Dimension": dimension_name, "Label": "Evaluated Total",
+                  "Count": evaluated_total, "Percentage": "100.00%"})
+    rows.append({"Dimension": dimension_name, "Label": "Grand Total",
+                  "Count": total, "Percentage": "100.00%"})
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -395,23 +453,7 @@ def main() -> None:
     if run_bm25:
         df[BM25_KNOWLEDGE_COLUMN] = bm25_knowledge
 
-    # Build summary
-    label_order = ["similar", "partial", "unsimilar", "fallback", "error"]
-    series = pd.Series(labels)
-    total = len(series)
-    fallback_count = int((series == "fallback").sum())
-    evaluated_total = total - fallback_count
-
-    counts = series.value_counts().reindex(label_order, fill_value=0)
-    rows = []
-    for label in label_order:
-        count = int(counts[label])
-        denom = evaluated_total if label in ("similar", "partial", "unsimilar") else total
-        denom = denom if denom > 0 else 1
-        rows.append({"Label": label, "Count": count, "Percentage": f"{count / denom * 100:.2f}%"})
-    rows.append({"Label": "Evaluated Total", "Count": evaluated_total, "Percentage": "100.00%"})
-    rows.append({"Label": "Grand Total",     "Count": total,           "Percentage": "100.00%"})
-    summary = pd.DataFrame(rows)
+    summary = build_summary(labels, "Column Description")
 
     logger.info("Evaluation summary:\n%s", summary.to_string(index=False))
 

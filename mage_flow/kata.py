@@ -1,7 +1,7 @@
 """KATA evidence backend — OpenSearch live search + Postgres cache lookups.
 
 Ported (standalone, sync) from:
-  - src/clients/kata_opensearch.py                    (search_data_elements)
+  - src/clients/kata_opensearch.py                    (search_data_elements, search_datasets)
   - src/repositories/kata_data_element_cache.py       (alias / technical-relation)
 
 This whole module is OPTIONAL. It is only touched when SETTINGS["kata"]["enabled"]
@@ -26,6 +26,7 @@ from .common import norm
 logger = logging.getLogger(__name__)
 
 KATA_ELEMENT_BASE_URL = "https://kata.bri.co.id/metadata-directory/element-detail"
+KATA_DATASET_BASE_URL = "https://kata.bri.co.id/metadata-directory/data-detail"
 
 
 def normalize_alias_key(value: Any) -> str:
@@ -38,8 +39,8 @@ def _is_active(value: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# OpenSearch client (live data-element search) — used only as a cache-miss
-# fallback when SETTINGS["kata"]["live_opensearch_fallback"] is True.
+# OpenSearch client (live data-element + dataset search) — used only as a
+# cache-miss fallback when SETTINGS["kata"]["live_opensearch_fallback"] is True.
 # ---------------------------------------------------------------------------
 
 class KataOpenSearchClient:
@@ -52,6 +53,10 @@ class KataOpenSearchClient:
         self.base_url = base.rstrip("/")
         self.timeout = config.KATA_OPENSEARCH_TIMEOUT
         self.data_element_index = config.KATA_DATA_ELEMENT_INDEX
+        # NEW — needed for search_datasets(). Falls back to production's own
+        # defaults ("dataset" / "draft") if not set in mage_flow/config.py yet.
+        self.dataset_index = getattr(config, "KATA_DATASET_INDEX", "dataset")
+        self.draft_index = getattr(config, "KATA_DRAFT_INDEX", "draft")
         self.use_dashboard_proxy = config.KATA_USE_DASHBOARD_PROXY
         self.session = requests.Session()
         username = (config.KATA_OPENSEARCH_USERNAME or "").strip()
@@ -66,6 +71,7 @@ class KataOpenSearchClient:
             self.session.headers.update({"osd-xsrf": "true"})
 
     def _search(self, index: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """POST {index}/_search — used by both data-element and dataset search."""
         path = f"{index}/_search"
         if self.use_dashboard_proxy:
             url = f"{self.base_url}/api/console/proxy"
@@ -129,6 +135,153 @@ class KataOpenSearchClient:
                 documents.append(document)
             if len(documents) >= 8:
                 break
+        return documents
+
+    # -- NEW: dataset-level search, ported from search_datasets() --------
+
+    def _candidate_dataset_indices(self) -> List[str]:
+        indices: List[str] = []
+        for index_name in (self.dataset_index, self.draft_index):
+            normalized = str(index_name or "").strip()
+            if normalized and normalized not in indices:
+                indices.append(normalized)
+        return indices
+
+    @staticmethod
+    def _to_dataset_document(doc_id: str, source: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Turn a raw OpenSearch dataset hit into {id, data_name, definition,
+        data_alias, document_link, status, data_elements, ...}. data_elements
+        is the pre-curated list of KATA data elements already linked to this
+        dataset (field 'data_element_used' in the raw source) — this is the
+        scoped candidate pool a human curator would browse for this table."""
+        if not doc_id:
+            return None
+
+        draft_type = str(source.get("draft_type") or "").strip().lower()
+        if draft_type and draft_type != "dataset":
+            return None
+
+        dataset_payload = source.get("data")
+        if not isinstance(dataset_payload, dict):
+            dataset_payload = source
+
+        data_name = str(
+            dataset_payload.get("data_name")
+            or source.get("data_name")
+            or source.get("dataset_name")
+            or ""
+        ).strip()
+        if not data_name:
+            return None
+
+        raw_aliases = (
+            dataset_payload.get("data_alias")
+            or source.get("data_alias")
+            or source.get("dataset_alias")
+            or []
+        )
+        data_alias = raw_aliases if isinstance(raw_aliases, list) else []
+
+        raw_elements = source.get("data_element_used") or dataset_payload.get("data_element_used")
+        data_elements: List[Dict[str, Any]] = []
+        if isinstance(raw_elements, list):
+            for item in raw_elements:
+                if not isinstance(item, dict):
+                    continue
+                data_element_name = str(item.get("data_element_name") or "").strip()
+                if not data_element_name:
+                    continue
+                data_elements.append(
+                    {
+                        "id": str(item.get("doc_id") or item.get("id") or "").strip() or None,
+                        "data_element_name": data_element_name,
+                        "definition": str(item.get("definition") or "").strip(),
+                        "data_element_alias": item.get("data_element_alias")
+                        if isinstance(item.get("data_element_alias"), list)
+                        else [],
+                        "format_type": item.get("format_type"),
+                        "status": item.get("status") or item.get("data_element_state"),
+                        "data_element_state": item.get("data_element_state"),
+                    }
+                )
+
+        return {
+            "id": doc_id,
+            "data_name": data_name,
+            "definition": str(dataset_payload.get("definition") or source.get("definition") or "").strip(),
+            "data_alias": data_alias,
+            "document_link": str(
+                dataset_payload.get("document_link") or source.get("document_link") or ""
+            ).strip() or None,
+            "status": source.get("status"),
+            "draft_type": source.get("draft_type"),
+            "data_elements": data_elements,
+            "data_element_count": len(data_elements),
+            "total_data_elements": len(data_elements),
+        }
+
+    def search_datasets(
+        self,
+        query: str,
+        *,
+        table_name: Optional[str] = None,
+        document_link: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search KATA datasets by free-text name (query) and/or exact
+        technical table_name / document_link. Returns each dataset with its
+        embedded, pre-curated data_elements list (see _to_dataset_document)."""
+        normalized = str(query or "").strip()
+        normalized_table_name = str(table_name or "").strip()
+        normalized_document_link = str(document_link or "").strip()
+        if not normalized and not normalized_table_name and not normalized_document_link:
+            return []
+
+        documents: List[Dict[str, Any]] = []
+        seen_ids = set()
+        for index_name in self._candidate_dataset_indices():
+            should: List[Dict[str, Any]] = []
+            if normalized:
+                should.extend(
+                    [
+                        {"match_phrase": {"data.data_name": {"query": normalized, "boost": 12}}},
+                        {"match_phrase": {"data_name": {"query": normalized, "boost": 12}}},
+                        {"match_phrase": {"dataset_name": {"query": normalized, "boost": 12}}},
+                        {"match_phrase": {"data.data_alias": {"query": normalized, "boost": 6}}},
+                        {"match_phrase": {"data_alias": {"query": normalized, "boost": 6}}},
+                        {"match": {"data.data_name": {"query": normalized, "fuzziness": "AUTO", "boost": 2}}},
+                        {"match": {"data_name": {"query": normalized, "fuzziness": "AUTO", "boost": 2}}},
+                    ]
+                )
+            if normalized_table_name:
+                should.extend(
+                    [
+                        {"term": {"data_alias.keyword": {"value": normalized_table_name, "boost": 12}}},
+                        {"term": {"data.data_alias.keyword": {"value": normalized_table_name, "boost": 12}}},
+                    ]
+                )
+            if normalized_document_link:
+                should.extend(
+                    [
+                        {"term": {"document_link.keyword": {"value": normalized_document_link, "boost": 8}}},
+                        {"term": {"data.document_link.keyword": {"value": normalized_document_link, "boost": 8}}},
+                    ]
+                )
+
+            payload: Dict[str, Any] = {
+                "size": 8,
+                "_source": True,
+                "query": {"bool": {"should": should, "minimum_should_match": 1}},
+            }
+            if index_name == self.draft_index:
+                payload["query"]["bool"]["filter"] = [{"term": {"draft_type.keyword": "dataset"}}]
+
+            response = self._search(index_name, payload)
+            for hit in response.get("hits", {}).get("hits", []):
+                document = self._to_dataset_document(str(hit.get("_id") or ""), hit.get("_source") or {})
+                if document is None or document["id"] in seen_ids:
+                    continue
+                seen_ids.add(document["id"])
+                documents.append(document)
         return documents
 
 
@@ -324,6 +477,7 @@ def select_kata_evidence(documents: List[Dict[str, Any]], column_name: str) -> O
 
 __all__ = [
     "KATA_ELEMENT_BASE_URL",
+    "KATA_DATASET_BASE_URL",
     "GENERIC_COLUMN_NAMES",
     "KataOpenSearchClient",
     "normalize_alias_key",

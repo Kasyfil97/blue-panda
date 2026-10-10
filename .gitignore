@@ -1,9 +1,22 @@
+# Environment
 .env
-*.xlsx
-*.log
-*.json
-.venv/
-.pyc
+venv/
+
+# Python
 __pycache__/
-evaluation/
-*.zip
+*.pyc
+
+# Outputs (hasil run, bukan source code)
+evaluation/*.xlsx
+evaluation/*.json
+evaluation/*.csv
+experiments/*.log
+experiments/__pycache__/
+
+experiments/*.xlsx
+experiments/*.json
+experiments/*.log
+
+# OS/editor
+.DS_Store
+*.swp

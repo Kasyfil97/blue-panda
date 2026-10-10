@@ -46,6 +46,8 @@ KATA_DATA_ELEMENT_INDEX = os.getenv(
     "KATA_DATA_ELEMENT_OPENSEARCH_INDEX",
     os.getenv("KATA_OPENSEARCH_INDEX", "data-element"),
 )
+KATA_DATASET_INDEX = os.getenv("KATA_DATASET_OPENSEARCH_INDEX", "dataset")
+KATA_DRAFT_INDEX = os.getenv("KATA_DRAFT_OPENSEARCH_INDEX", "draft")
 KATA_USE_DASHBOARD_PROXY = os.getenv("KATA_OPENSEARCH_USE_DASHBOARD_PROXY", "false").strip().lower() in {
     "1", "true", "yes", "y",
 }
