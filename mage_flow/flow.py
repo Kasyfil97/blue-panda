@@ -11,7 +11,9 @@ Public entry points:
 
 from __future__ import annotations
 
+import json
 import logging
+import threading
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,11 +22,29 @@ from .clients import BM25Client, get_llm_client
 from .common import ai_prefix, is_missing_desc, norm
 from .confluence import ConfluenceDiscoveryRequest, ConfluenceDiscoveryResponse, ConfluenceDiscoveryService
 from .llm_generation import LLMGeneration
-from .resolvers import ResolverContext, build_resolver_chain
+from .resolvers import BaseResolver, ConfluenceFallbackResolver, ResolverContext, build_resolver_chain
 
 logger = logging.getLogger(__name__)
 
-_RESOLVER_CHAIN = build_resolver_chain()
+# Chains are built once per distinct chain config and reused, so the KATA dataset
+# cache and the approved-examples file are shared across tables/columns.
+_CHAINS: Dict[str, List[BaseResolver]] = {}
+_CHAINS_LOCK = threading.Lock()
+
+
+def _get_resolver_chain(settings: Dict[str, Any]) -> List[BaseResolver]:
+    key = json.dumps(
+        {"chain": settings.get("resolver_chain", "v6"), "kata_similar": settings.get("kata_similar", {})},
+        sort_keys=True, default=str,
+    )
+    with _CHAINS_LOCK:
+        chain = _CHAINS.get(key)
+        if chain is None:
+            chain = build_resolver_chain(settings)
+            _CHAINS[key] = chain
+            logger.info("[chain] built %s: %s", settings.get("resolver_chain", "v6"),
+                        [getattr(r, "resolution_tag", r.name) for r in chain])
+        return chain
 
 
 # ===========================================================================
@@ -165,6 +185,9 @@ def _should_attempt_confluence_fallback(
     cfg = settings.get("confluence_fallback", {})
     if not cfg.get("enabled", False):
         return False
+    # Discovery only feeds ConfluenceFallbackResolver; skip it when the chain has none (v6).
+    if not any(isinstance(r, ConfluenceFallbackResolver) for r in _get_resolver_chain(settings)):
+        return False
     missing = [c for c in columns if is_missing_desc(c.get("ColumnDescription"))]
     if not missing:
         return False
@@ -286,8 +309,13 @@ def process_column(
     force_bt: bool = False,
     temporary_knowledge_by_column: Optional[Dict[str, List[Dict[str, Any]]]] = None,
     table_term_context: Optional[List[Dict[str, str]]] = None,
+    table_columns: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
-    """Process a SINGLE column via the resolver chain. Mutates ``column`` in place."""
+    """Process a SINGLE column via the resolver chain. Mutates ``column`` in place.
+
+    ``table_columns`` ([{"ColumnName", "ColumnDataType"}, ...] for the whole
+    table) is sibling-column context for kata_similar.
+    """
     col_name = norm(column.get("ColumnName"))
     if not col_name:
         return "skipped"
@@ -314,10 +342,12 @@ def process_column(
         bm25=bm25, llm=llm, sampling_params=sampling_params, bm25_params=bm25_params, settings=settings,
         request_id=request_id, temporary_knowledge_by_column=temporary_knowledge_by_column or {},
         table_term_context=table_term_context or [],
+        data_type=norm(column.get("ColumnDataType")),
+        table_columns=table_columns or [],
     )
 
     logger.info("[chain] %s: start resolver chain (force=%s)", col_name, force_generate)
-    for resolver in _RESOLVER_CHAIN:
+    for resolver in _get_resolver_chain(settings):
         result = resolver.resolve(ctx)
         if result.resolved:
             logger.info("[chain] %s: RESOLVED by %s -> tag=%s", col_name, resolver.name, result.resolution_tag)
@@ -477,6 +507,10 @@ def generate_metadata(
         confluence_summary["status"] = "skipped_strong_bm25_or_complete"
 
     # ---- 2. Process columns (sequential) ----
+    table_columns = [
+        {"ColumnName": norm(c.get("ColumnName")), "ColumnDataType": norm(c.get("ColumnDataType"))}
+        for c in columns if norm(c.get("ColumnName"))
+    ]
     outcomes: List[Dict[str, Any]] = []
     for col in validated_table.get("Columns", []):
         col_name = norm(col.get("ColumnName")) or "<unknown>"
@@ -488,6 +522,7 @@ def generate_metadata(
                 bt_sampling_params=bt_sampling_params, force_bt=force_bt,
                 temporary_knowledge_by_column=temporary_knowledge_by_column,
                 table_term_context=table_term_context,
+                table_columns=table_columns,
             )
             outcomes.append({"column_name": col_name, "status": "ok", "resolution": resolution or "none"})
         except Exception as exc:
@@ -542,13 +577,15 @@ def generate_column(
     table_name: str,
     col_name: str,
     *,
+    data_type: Optional[str] = None,
     settings: Optional[Dict[str, Any]] = None,
     bm25: Optional[BM25Client] = None,
     llm: Optional[LLMGeneration] = None,
 ) -> Dict[str, Any]:
     """Run the full resolver chain for ONE column (no table description / auto-approve)."""
     settings = settings if settings is not None else config.default_settings()
-    table = {"TableName": table_name, "Columns": [{"ColumnName": col_name, "ColumnDescription": ""}]}
+    table = {"TableName": table_name,
+             "Columns": [{"ColumnName": col_name, "ColumnDescription": "", "ColumnDataType": data_type or ""}]}
 
     # Reuse the table flow but disable table-description generation for a single column.
     settings = dict(settings)

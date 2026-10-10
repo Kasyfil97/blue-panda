@@ -1,13 +1,18 @@
 """The resolver chain — synchronous port of src/services/resolvers/*.
 
-Chain order (experiment 5):
+Chain "v6" (default; settings["resolver_chain"], evaluated in
+experiments/hierarchy_v4_eval.py + docs/evaluasi_hierarchy_v3_v6.md):
   1. ExactMatchResolver   (AS400 priority)      -> exact_as400
-  2. BM25Resolver         (AS400 sources)       -> bm25_as400   (only for AS400/AS4 tables)
+  2. KataSimilarResolver  (kata_similar.py)     -> kata_similar | kata_similar_rescue
   3. KataEvidenceResolver                        -> kata_technical_relation | kata_alias
-  4. BM25Resolver         (Confluence sources)  -> bm25_confluence
-  5. BM25Resolver         (Informatica cert.)   -> bm25_informatica_certified
-  6. ConfluenceFallbackResolver                  -> confluence_fallback
+  4. BM25Resolver         (Informatica cert.)   -> bm25_informatica_certified
+  5. BM25Resolver         (Confluence sources)  -> bm25_confluence
+  6. BM25Resolver         (AS400 sources)       -> bm25_as400   (only for AS400/AS4 tables)
   7. PureLLMResolver                             -> llm | unknown
+
+Chain "legacy" (experiment 5, the original production order):
+  exact_as400 -> bm25_as400 -> kata_technical_relation|kata_alias ->
+  bm25_confluence -> bm25_informatica_certified -> confluence_fallback -> llm
 
 Each resolver is a small class with .resolve(ctx) -> ResolverResult. The first
 one that returns resolved=True wins.
@@ -69,6 +74,13 @@ class ResolverContext:
     #: Table-level term context (istilah tabel), fetched once per table in the flow
     #: and shared across all columns. Prepended to the per-column abbreviation context.
     table_term_context: List[Dict[str, str]] = field(default_factory=list)
+    #: Column data type (e.g. "int", "string"); read by KataSimilarResolver.
+    data_type: str = ""
+    #: AS400 BM25 dictionary entries for this column; KataSimilarResolver evidence.
+    extra_knowledge: List[Dict[str, Any]] = field(default_factory=list)
+    #: Other columns of the same table ({"ColumnName", "ColumnDataType"}), used as
+    #: disambiguation context by KataSimilarResolver(enriched_context=True).
+    table_columns: List[Dict[str, Any]] = field(default_factory=list)
 
     _hypothesis: Optional[str] = field(default=None, repr=False)
     _abbr_context: Optional[Any] = field(default=None, repr=False)
@@ -473,7 +485,7 @@ def _is_as400_table(table_name: str) -> bool:
     return any(token in _AS400_TABLE_TOKENS for token in tokens)
 
 
-def build_resolver_chain() -> List[BaseResolver]:
+def build_legacy_resolver_chain() -> List[BaseResolver]:
     return [
         ExactMatchResolver(allowed_priorities={KNOWLEDGE_PRIORITY_AS400}, resolution_tag="exact_as400"),
         BM25Resolver(
@@ -498,6 +510,73 @@ def build_resolver_chain() -> List[BaseResolver]:
     ]
 
 
+def _approved_examples_provider(cfg: Dict[str, Any]):
+    """``ctx -> str`` few-shot provider, or None when disabled / file missing."""
+    from pathlib import Path
+
+    from .approved_examples import ApprovedExamples, format_examples
+
+    if not cfg.get("enabled", False):
+        return None
+    path = Path(norm(cfg.get("path")))
+    if not path.is_file():
+        logger.warning("[chain] approved examples file not found (%s) -> kata_similar runs without examples", path)
+        return None
+    examples = ApprovedExamples.from_workbook(path, sheet=cfg.get("sheet") or "Validate")
+    top_k = int(cfg.get("top_k", 5))
+    return lambda ctx: format_examples(examples.similar(ctx.col_name, ctx.table_name, k=top_k))
+
+
+def build_v6_resolver_chain(kata_similar_cfg: Optional[Dict[str, Any]] = None) -> List[BaseResolver]:
+    # Imported here: kata_similar imports this module (BaseResolver, BM25Resolver).
+    from .kata_similar import KataDatasetPool, KataSimilarResolver
+
+    cfg = kata_similar_cfg or {}
+    bm25_as400 = BM25Resolver(
+        allowed_priorities=None,
+        source_types=_AS400_SOURCE_TYPES,
+        run_if=lambda ctx: _is_as400_table(ctx.table_name),
+        resolution_tag="bm25_as400",
+    )
+    kata_similar = KataSimilarResolver(
+        pool=KataDatasetPool(),
+        use_bm25_context=bool(cfg.get("use_bm25_context", True)),
+        enable_rescue=bool(cfg.get("enable_rescue", True)),
+        enriched_context=bool(cfg.get("enriched_context", True)),
+        type_filter=bool(cfg.get("type_filter", True)),
+        examples_provider=_approved_examples_provider(cfg.get("approved_examples", {})),
+        evidence_resolver=bm25_as400,
+    )
+    return [
+        ExactMatchResolver(allowed_priorities={KNOWLEDGE_PRIORITY_AS400}, resolution_tag="exact_as400"),
+        kata_similar,
+        KataEvidenceResolver(),
+        BM25Resolver(
+            allowed_priorities={KNOWLEDGE_PRIORITY_INFORMATICA_CERTIFIED},
+            source_types=["informatica"],
+            resolution_tag="bm25_informatica_certified",
+        ),
+        BM25Resolver(
+            allowed_priorities=None,
+            source_types=["confluence"],
+            resolution_tag="bm25_confluence",
+        ),
+        bm25_as400,
+        PureLLMResolver(),
+    ]
+
+
+def build_resolver_chain(settings: Optional[Dict[str, Any]] = None) -> List[BaseResolver]:
+    """Chain selected by settings["resolver_chain"] ("v6" default, or "legacy")."""
+    settings = settings or {}
+    version = norm(settings.get("resolver_chain") or "v6").lower()
+    if version == "legacy":
+        return build_legacy_resolver_chain()
+    if version != "v6":
+        raise ValueError(f"unknown resolver_chain {version!r} (expected 'v6' or 'legacy')")
+    return build_v6_resolver_chain(settings.get("kata_similar"))
+
+
 __all__ = [
     "ResolverResult",
     "ResolverContext",
@@ -508,4 +587,6 @@ __all__ = [
     "ConfluenceFallbackResolver",
     "PureLLMResolver",
     "build_resolver_chain",
+    "build_legacy_resolver_chain",
+    "build_v6_resolver_chain",
 ]

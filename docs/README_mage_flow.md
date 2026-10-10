@@ -11,16 +11,41 @@ package (resolvers, clients, LLM generation, KATA/Confluence services). This
 copy pulls all the relevant logic into one small package you can edit freely:
 prompts, search params, the resolver chain, and the orchestration.
 
-## The flow (identical order to production `_RESOLVER_CHAIN`)
+## The flow
 
-Per column, first stage that resolves wins:
+Per column, the first stage that resolves wins. The chain is chosen by
+`settings["resolver_chain"]`.
+
+### `"v6"` (default)
+
+Evaluated in `experiments/hierarchy_v4_eval.py`; results and method in
+`docs/evaluasi_hierarchy_v3_v6.md` (desc similar 85% in v3 -> 92% in v6).
 
 1. **exact_as400** — exact BM25 lookup, AS400 source only
-2. **bm25_as400** — BM25 term search + LLM synthesis, AS400 source only
-3. **kata_evidence** — KATA technical-relation / alias match *(gated off)*
+2. **kata_similar** — candidates from the table's KATA dataset, an LLM picks one
+   (rescue: global KATA search). Configured by `settings["kata_similar"]`:
+   - `enriched_context` — system context, table terms, abbreviation expansion,
+     sibling columns + data types, token/specificity/generic-name rules
+   - `type_filter` — drops candidates whose value kind conflicts with the column
+     data type before the LLM sees them
+   - `use_bm25_context` — AS400 tables: BM25 dictionary hits as evidence
+   - `approved_examples` — steward-approved metadata of similarly-named columns
+     (default file `MAGE - Human Evaluation for MAGE.xlsx`, sheet `Validate`, or
+     `MAGE_APPROVED_EXAMPLES_PATH`); skipped with a warning if the file is missing
+3. **kata_evidence** — KATA technical-relation / alias match
 4. **bm25_informatica_certified** — BM25 term search, Informatica-certified only
-5. **confluence_fallback** — evidence discovered up front from Confluence *(gated off)*
-6. **pure_llm** — hypothesis + understanding-check gate, then LLM generation
+5. **bm25_confluence** — BM25 term search, Confluence source
+6. **bm25_as400** — BM25 term search + LLM synthesis, AS400 tables only
+7. **pure_llm** — hypothesis + understanding-check gate, then LLM generation
+
+Pass `ColumnDataType` for each column: the type filter and the sibling-column
+context depend on it.
+
+### `"legacy"` (original production order)
+
+exact_as400 -> bm25_as400 -> kata_evidence -> bm25_confluence ->
+bm25_informatica_certified -> confluence_fallback -> pure_llm. Confluence
+discovery only runs with this chain.
 
 Table-level extras: **table description** generation, **business title**
 generation, **auto-approve** eligibility, and a **GenerationSummary**.
@@ -75,6 +100,8 @@ is off).
 | `llm_generation.py` | prompt formatting + JSON parsing per task |
 | `source_priority.py` | AS400 / KATA / Informatica priority policy |
 | `kata.py` | KATA OpenSearch + Postgres cache (gated) |
-| `confluence.py` | Confluence discovery heuristics (gated) |
-| `resolvers.py` | the 6-stage resolver chain |
+| `kata_similar.py` | KATA dataset-scoped LLM selection (v6 step 2) |
+| `approved_examples.py` | steward-approved few-shot examples for `kata_similar` |
+| `confluence.py` | Confluence discovery heuristics (legacy chain only) |
+| `resolvers.py` | the resolver chains (`v6` / `legacy`) |
 | `flow.py` | orchestrator: `generate_metadata` / `generate_column` |
