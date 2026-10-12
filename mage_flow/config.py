@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import os
+from pathlib import Path
 from typing import Any, Dict
 
 from dotenv import load_dotenv
@@ -84,6 +85,13 @@ CONFLUENCE_PAT = os.getenv("PAT", os.getenv("CONFLUENCE_PAT", ""))
 CONFLUENCE_TIMEOUT_CONNECT = float(os.getenv("CONFLUENCE_TIMEOUT_CONNECT", "5"))
 CONFLUENCE_TIMEOUT_READ = float(os.getenv("CONFLUENCE_TIMEOUT_READ", "20"))
 
+# Steward-approved metadata used as few-shot examples by kata_similar
+# (sheet "Validate" of the human-evaluation workbook; see approved_examples.py).
+APPROVED_EXAMPLES_PATH = os.getenv(
+    "MAGE_APPROVED_EXAMPLES_PATH",
+    str(Path(__file__).resolve().parents[1] / "MAGE - Human Evaluation for MAGE.xlsx"),
+)
+
 
 # ---------------------------------------------------------------------------
 # Runtime settings (mirrors production `settings` + feature flags)
@@ -111,6 +119,26 @@ _DEFAULT_SETTINGS: Dict[str, Any] = {
         "enabled": True,
         "sampling": {"temperature": 0.1, "top_p": 0.9, "max_tokens": 500},
     },
+    # Which resolver chain process_column runs (see resolvers.build_resolver_chain):
+    #   "v6"     exact_match -> kata_similar -> kata_alias -> bm25_informatica
+    #            -> bm25_confluence -> bm25_as400 -> pure_llm   (evaluated best)
+    #   "legacy" the original production order (exact_as400 -> bm25_as400 -> kata
+    #            -> bm25_confluence -> bm25_informatica -> confluence_fallback -> llm)
+    "resolver_chain": "v6",
+    # KATA dataset-scoped selection (KataSimilarResolver); only used by the v6 chain.
+    "kata_similar": {
+        "enabled": True,
+        "enriched_context": True,   # system ctx, terms, abbreviations, sibling columns + rules
+        "type_filter": True,        # drop candidates whose value kind conflicts with the data type
+        "use_bm25_context": True,   # AS400 tables: show BM25 dictionary hits to the selector
+        "enable_rescue": True,      # global KATA search when the dataset pool has no match
+        "approved_examples": {
+            "enabled": True,        # steward-approved few-shot examples (skipped if the file is missing)
+            "path": APPROVED_EXAMPLES_PATH,
+            "sheet": "Validate",
+            "top_k": 5,
+        },
+    },
     # ---- Heavy optional stages (OFF by default) ----
     "kata": {
         "enabled": True,                  # master switch for the KATA resolver
@@ -119,6 +147,7 @@ _DEFAULT_SETTINGS: Dict[str, Any] = {
         "live_opensearch_fallback": True,    # hit KATA OpenSearch when the cache misses
                                              # (required here: the local cache is empty)
     },
+    # Only consulted by the legacy chain (v6 has no ConfluenceFallbackResolver).
     "confluence_fallback": {
         "enabled": True,
         "min_table_score": 8.0,   # only try Confluence when best table hit is weaker

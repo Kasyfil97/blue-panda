@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import kata as kata_backend
 from .common import is_missing_desc, norm, parse_llm_output
@@ -39,8 +39,8 @@ from .source_priority import filter_by_priority
 
 logger = logging.getLogger(__name__)
 
-SELECTION_MAX_TOKENS = 900
-KEYWORD_MAX_TOKENS = 150
+SELECTION_MAX_TOKENS = 2000
+KEYWORD_MAX_TOKENS = 400
 MAX_EVIDENCE_ITEMS = 5
 MAX_EVIDENCE_CHARS = 300
 
@@ -126,6 +126,143 @@ OUTPUT FORMAT (STRICT JSON ONLY):
 }}
 """
 
+# Enriched variant (error-analysis suggestion #2/#3): same task, but the model
+# also sees the table's system context, table term knowledge, the column's
+# abbreviation expansion and its sibling columns, plus explicit specificity,
+# generic-name and data-type compatibility rules. .format()-ed -> double braces.
+ENRICHED_SELECTION_SYSTEM_PROMPT = """\
+You are a banking data steward selecting the correct KATA data element for a
+database column, from a set of retrieved candidates. This choice becomes
+official metadata, so accuracy matters more than always picking something.
+
+INTERNAL REASONING REQUIREMENT:
+- Reason internally, in the order below.
+- Do NOT reveal reasoning in the output — only the final JSON.
+
+INPUTS:
+- Table name: {table_name}
+- Source system context (may be empty):
+{system_context}
+- Table term knowledge (codes found in the TABLE name; describes the whole
+  table's domain, may be empty):
+{table_terms}
+- Column name (technical): {col_name}
+- Column data type: {data_type}
+- Abbreviation expansion of column-name tokens (dictionary lookup; may contain
+  irrelevant partial matches — use only tokens that fit the table):
+{abbr_terms}
+- Other columns in the same table (name: data type):
+{sibling_columns}
+- Supporting evidence (dictionary entries retrieved for this column; may be
+  empty; NOT candidates, only context):
+{evidence_block}
+- Steward-approved metadata of similarly-named columns in OTHER tables (shows
+  naming conventions and what abbreviations meant elsewhere; NOT candidates,
+  may be from a different domain):
+{approved_examples}
+- Candidates (may or may not be relevant):
+{candidates_json}
+
+REASONING STEPS (MANDATORY ORDER):
+0. Use the approved examples only to interpret abbreviations and naming
+   conventions (e.g. "...dat" = a date, "userid_ao" = the AO's personal
+   number). The selection must still be one of the candidates and must fit
+   THIS table.
+1. Infer the table's business domain from the table name, system context,
+   table term knowledge AND the sibling columns (e.g. a table that has
+   carcod + cardsc + lnparr columns is about loan collectibility, not cards;
+   a table named tbl_kodepos with kelurahan/kecamatan columns is a postal
+   reference table).
+2. Interpret the column within that domain. Split its name into tokens and
+   explain EVERY token (e.g. "acctbranch" = account + branch -> the branch
+   where the account was opened; "tramt" = transaction amount; "branch_pemasar"
+   = branch of the marketer, not the marketer's id). Sibling columns often
+   reveal what a token means (a "...cod" / "...dsc" pair = code + description
+   of the same concept).
+3. GENERIC column names (id, name, code, status, amount, branch, type, date,
+   business, ...): their meaning comes ONLY from the table. Prefer a candidate
+   tied to the table's own entity (e.g. "status" in a transaction table =
+   transaction status; "name" in a merchant table = merchant name). If the
+   table is not about the entity a candidate names (e.g. "Nama Pembeli" for a
+   table whose rows are merchants), reject that candidate.
+4. DATA TYPE COMPATIBILITY: the candidate must be able to hold this data type.
+   - int / bigint / smallint / tinyint / boolean columns cannot be free text
+     (Nama, Alamat, Deskripsi, Keterangan); an int column named like a text
+     concept (e.g. address_main) is usually a FLAG or an ID.
+   - a string column holding structured data (json, config, override payload)
+     is not a single flag/code.
+   - timestamp / date columns must map to a date/time concept, and its
+     meaning must match the name (updated_at = last data change, NOT ingestion
+     or load date).
+   - "amount" / "jumlah" can be a money value OR a count; use the table and
+     siblings to decide.
+5. SPECIFICITY: among candidates that fit, choose the one that covers the
+   MOST tokens / qualifiers of the column and the table's domain. Reject a
+   generic candidate (e.g. "Kode Kantor Cabang", "Kurs", "Kode Status") when
+   the column clearly carries an extra qualifier the candidate lacks
+   (pembukaan rekening, spread, transaksi) — unless no more specific
+   candidate exists, in which case still pick it but lower your confidence.
+6. If NONE of the candidates is a genuine match, reject all of them. Picking
+   nothing is the correct, expected outcome for many columns.
+
+OUTPUT FORMAT (STRICT JSON ONLY):
+{{
+  "selected_id": "<candidate id, or empty string if none genuinely match>",
+  "confidence": <number 0..1 — how sure you are the selected element is exactly this column's meaning>,
+  "reasoning": "<one short sentence, in Indonesian, explaining the decision>",
+  "alternative_ids": ["<id>", "..."]
+}}
+"""
+
+MAX_SYSTEM_CONTEXT_CHARS = 1200
+MAX_SIBLING_COLUMNS = 40
+
+
+# ---------------------------------------------------------------------------
+# Data-type compatibility pre-filter (error-analysis suggestion #3)
+#
+# KATA elements carry no usable data type (format_type is always empty), so a
+# candidate's value kind is inferred from the FIRST word(s) of its name. Only
+# clear-cut conflicts are rejected; anything ambiguous passes through to the
+# LLM. Dates stored as numbers (AS400 decimal YYYYMMDD) stay allowed.
+# ---------------------------------------------------------------------------
+
+_NUMERIC_TYPES = frozenset({"int", "integer", "bigint", "smallint", "tinyint", "decimal", "numeric",
+                            "double", "float", "real", "number", "boolean", "bool"})
+_TEMPORAL_TYPES = frozenset({"timestamp", "datetime", "date", "time"})
+_FREE_TEXT_PREFIXES = ("nama", "alamat", "deskripsi", "keterangan", "catatan", "uraian", "email", "judul", "teks")
+_NON_TEMPORAL_PREFIXES = _FREE_TEXT_PREFIXES + (
+    "jumlah", "nominal", "saldo", "total", "nilai", "kode", "nomor", "no ", "id ", "flag", "status", "persentase",
+)
+
+
+def _base_type(data_type: str) -> str:
+    """'decimal(18,2)' -> 'decimal'."""
+    return norm(data_type).lower().split("(")[0].strip()
+
+
+def type_conflict(data_type: str, candidate: Dict[str, Any]) -> str:
+    """Reason string when the candidate cannot hold this column's data type, else ''."""
+    base = _base_type(data_type)
+    name = norm(candidate.get("data_element_name")).lower() + " "
+    if base in _NUMERIC_TYPES and name.startswith(_FREE_TEXT_PREFIXES):
+        return f"free-text element for {base} column"
+    if base in _TEMPORAL_TYPES and name.startswith(_NON_TEMPORAL_PREFIXES):
+        return f"non-temporal element for {base} column"
+    return ""
+
+
+def filter_by_data_type(data_type: str, candidates: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], List[str]]:
+    """Split candidates into (compatible, rejected element names)."""
+    kept: List[Dict[str, Any]] = []
+    rejected: List[str] = []
+    for cand in candidates or []:
+        if type_conflict(data_type, cand):
+            rejected.append(norm(cand.get("data_element_name")))
+        else:
+            kept.append(cand)
+    return kept, rejected
+
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -163,6 +300,29 @@ def format_evidence(items: Optional[List[Dict[str, Any]]]) -> str:
         column = norm(item.get("column_name"))
         source = norm(item.get("source_type"))
         lines.append(f"- {table}.{column} [{source}]: {desc[:MAX_EVIDENCE_CHARS]}")
+    return "\n".join(lines)
+
+
+def format_term_entries(entries: Optional[List[Dict[str, Any]]]) -> str:
+    """Render [{code: meaning}, ...] term lookups as '- code: meaning' lines,
+    dropping empty meanings (partial-match noise such as {'a': ''})."""
+    lines: List[str] = []
+    for entry in entries or []:
+        if not isinstance(entry, dict):
+            continue
+        for code, meaning in entry.items():
+            if norm(code) and norm(meaning):
+                lines.append(f"- {norm(code)}: {norm(meaning)}")
+    return "\n".join(lines)
+
+
+def format_sibling_columns(columns: Optional[List[Dict[str, Any]]], exclude: str) -> str:
+    lines: List[str] = []
+    for col in (columns or [])[:MAX_SIBLING_COLUMNS]:
+        name = norm(col.get("ColumnName")) if isinstance(col, dict) else ""
+        if not name or name.lower() == norm(exclude).lower():
+            continue
+        lines.append(f"- {name}: {norm(col.get('ColumnDataType')) or '?'}")
     return "\n".join(lines)
 
 
@@ -259,10 +419,27 @@ class KataSimilarResolver(BaseResolver):
         kata_client: Optional[kata_backend.KataOpenSearchClient] = None,
         use_bm25_context: bool = False,
         enable_rescue: bool = True,
+        enriched_context: bool = False,
+        type_filter: bool = False,
+        examples_provider: Optional[Callable[[ResolverContext], str]] = None,
+        evidence_resolver: Optional[BM25Resolver] = None,
     ) -> None:
         self._pool = pool or KataDatasetPool(kata_client)
         self.use_bm25_context = use_bm25_context
         self.enable_rescue = enable_rescue
+        #: Use ENRICHED_SELECTION_SYSTEM_PROMPT (system context, table terms,
+        #: abbreviations, sibling columns, specificity/data-type rules) and a
+        #: table-aware rescue query for generic column names.
+        self.enriched_context = enriched_context
+        #: Drop candidates whose value kind conflicts with the column data type
+        #: (filter_by_data_type) BEFORE the LLM sees them, for both pools.
+        self.type_filter = type_filter
+        #: Optional ``ctx -> str`` returning formatted steward-approved examples
+        #: (see approved_examples.py); only used with enriched_context.
+        self.examples_provider = examples_provider
+        #: AS400 BM25Resolver used to fetch ctx.extra_knowledge when the caller
+        #: did not pre-fill it (the production flow); its run_if limits it to AS400 tables.
+        self.evidence_resolver = evidence_resolver
 
     @property
     def name(self) -> str:
@@ -273,19 +450,26 @@ class KataSimilarResolver(BaseResolver):
     def _select(
         self, llm_client: Any, ctx: ResolverContext, data_type: str,
         candidates: List[Dict[str, Any]], evidence_text: str,
+        enriched_fields: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         if not candidates:
-            return {"selected": None, "reasoning": "no candidates"}
+            return {"selected": None, "reasoning": "no candidates", "confidence": None}
         candidates_json = json.dumps(
             [{"id": _display_key(c), "data_element_name": c.get("data_element_name"),
               "definition": c.get("definition"), "aliases": c.get("data_element_alias", [])}
              for c in candidates],
             ensure_ascii=False, indent=2,
         )
-        prompt = SELECTION_SYSTEM_PROMPT.format(
-            table_name=ctx.table_name, col_name=ctx.col_name, data_type=data_type or "(unknown)",
-            evidence_block=evidence_text or "(none)", candidates_json=candidates_json,
-        )
+        if enriched_fields is not None:
+            prompt = ENRICHED_SELECTION_SYSTEM_PROMPT.format(
+                table_name=ctx.table_name, col_name=ctx.col_name, data_type=data_type or "(unknown)",
+                evidence_block=evidence_text or "(none)", candidates_json=candidates_json, **enriched_fields,
+            )
+        else:
+            prompt = SELECTION_SYSTEM_PROMPT.format(
+                table_name=ctx.table_name, col_name=ctx.col_name, data_type=data_type or "(unknown)",
+                evidence_block=evidence_text or "(none)", candidates_json=candidates_json,
+            )
         messages = [
             {"role": "system", "content": prompt},
             {"role": "user", "content": "Select the best candidate now, following the reasoning steps above."},
@@ -299,12 +483,52 @@ class KataSimilarResolver(BaseResolver):
                 raise ValueError("selection output is not a JSON object")
         except Exception as exc:  # noqa: BLE001
             logger.warning("[kata_similar] selection failed for %s.%s: %s", ctx.table_name, ctx.col_name, exc)
-            return {"selected": None, "reasoning": f"LLM error: {exc}"}
+            return {"selected": None, "reasoning": f"LLM error: {exc}", "confidence": None}
         by_key = {_display_key(c): c for c in candidates}
+        try:
+            confidence = float(parsed.get("confidence")) if parsed.get("confidence") is not None else None
+        except (TypeError, ValueError):
+            confidence = None
         return {
             "selected": by_key.get(norm(parsed.get("selected_id"))),
             "reasoning": norm(parsed.get("reasoning")),
+            "confidence": confidence,
         }
+
+    def _enriched_fields(self, ctx: ResolverContext) -> Dict[str, str]:
+        try:
+            abbr = ctx.bm25.get_abbreviation_context(ctx.col_name, request_id=ctx.request_id)
+        except Exception as exc:  # noqa: BLE001 - context is best-effort
+            logger.warning("[kata_similar] abbreviation lookup failed for %s: %s", ctx.col_name, exc)
+            abbr = []
+        return {
+            "system_context": norm(ctx.system_context)[:MAX_SYSTEM_CONTEXT_CHARS] or "(none)",
+            "table_terms": format_term_entries(ctx.table_term_context) or "(none)",
+            "abbr_terms": format_term_entries(abbr) or "(none)",
+            "sibling_columns": format_sibling_columns(ctx.table_columns, ctx.col_name) or "(none)",
+            "approved_examples": self._approved_examples(ctx) or "(none)",
+        }
+
+    def _approved_examples(self, ctx: ResolverContext) -> str:
+        if self.examples_provider is None:
+            return ""
+        try:
+            return self.examples_provider(ctx)
+        except Exception as exc:  # noqa: BLE001 - examples are best-effort context
+            logger.warning("[kata_similar] approved examples failed for %s.%s: %s", ctx.table_name, ctx.col_name, exc)
+            return ""
+
+    def _rescue_query(self, llm_client: Any, ctx: ResolverContext, dataset_name: str) -> str:
+        keyword = extract_keyword(llm_client, ctx.col_name) or ctx.col_name
+        # A generic column name ("code", "name", "status") searched alone returns
+        # generic elements; anchor it to the table's entity instead.
+        if self.enriched_context and norm(ctx.col_name).lower() in kata_backend.GENERIC_COLUMN_NAMES | {
+            "amount", "branch", "business", "nik",
+        }:
+            table_keyword = dataset_name or extract_keyword(llm_client, ctx.table_name)
+            if table_keyword:
+                keyword = f"{keyword} {table_keyword}"
+        return keyword
 
     def _backfill(self, candidate: Dict[str, Any]) -> Dict[str, Any]:
         """Recover a missing definition (and a real id) by exact-name lookup."""
@@ -330,11 +554,25 @@ class KataSimilarResolver(BaseResolver):
 
     # -- resolve ------------------------------------------------------------
 
+    def _evidence(self, ctx: ResolverContext) -> List[Dict[str, Any]]:
+        if not self.use_bm25_context:
+            return []
+        if not ctx.extra_knowledge and self.evidence_resolver is not None:
+            try:
+                ctx.extra_knowledge = retrieve_bm25_knowledge(self.evidence_resolver, ctx)
+            except Exception as exc:  # noqa: BLE001 - evidence is best-effort context
+                logger.warning("[kata_similar] BM25 evidence retrieval failed for %s.%s: %s", ctx.table_name, ctx.col_name, exc)
+        return list(ctx.extra_knowledge or [])
+
     def resolve(self, ctx: ResolverContext) -> ResolverResult:
+        if not ctx.settings.get("kata_similar", {}).get("enabled", True):
+            logger.info("[kata_similar] disabled in settings -> skip")
+            return ResolverResult(False, self.name)
         llm_client = ctx.llm.client
-        data_type = norm(getattr(ctx, "data_type", ""))
-        evidence_items = (getattr(ctx, "extra_knowledge", None) or []) if self.use_bm25_context else []
+        data_type = norm(ctx.data_type)
+        evidence_items = self._evidence(ctx)
         evidence_text = format_evidence(evidence_items)
+        enriched_fields = self._enriched_fields(ctx) if self.enriched_context else None
 
         info = self._pool.get(ctx.table_name, extract_keyword_fn=lambda raw: extract_keyword(llm_client, raw))
         scoped = info["data_elements"]
@@ -344,21 +582,36 @@ class KataSimilarResolver(BaseResolver):
             len(scoped), len(evidence_items),
         )
 
+        type_rejected: List[str] = []
+        if self.type_filter:
+            scoped, type_rejected = filter_by_data_type(data_type, scoped)
+            if type_rejected:
+                logger.info("[kata_similar] %s.%s: type filter (%s) dropped %s",
+                            ctx.table_name, ctx.col_name, data_type, type_rejected)
+
         tag = "kata_similar"
         rescue_query = ""
         n_candidates = len(scoped)
-        selection = self._select(llm_client, ctx, data_type, scoped, evidence_text)
+        selection = self._select(llm_client, ctx, data_type, scoped, evidence_text, enriched_fields)
 
         if selection["selected"] is None and self.enable_rescue:
-            rescue_query = extract_keyword(llm_client, ctx.col_name) or ctx.col_name
+            rescue_query = self._rescue_query(llm_client, ctx, info["name"])
             try:
                 rescue_candidates = self._pool.client().search_data_elements(rescue_query)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[kata_similar] rescue search failed for %r: %s", rescue_query, exc)
                 rescue_candidates = []
+            if self.type_filter:
+                rescue_candidates, dropped = filter_by_data_type(data_type, rescue_candidates)
+                if dropped:
+                    logger.info("[kata_similar] %s.%s: type filter (%s) dropped rescue %s",
+                                ctx.table_name, ctx.col_name, data_type, dropped)
+                type_rejected += dropped
             if rescue_candidates:
                 n_candidates = len(rescue_candidates)
-                rescue_selection = self._select(llm_client, ctx, data_type, rescue_candidates, evidence_text)
+                rescue_selection = self._select(
+                    llm_client, ctx, data_type, rescue_candidates, evidence_text, enriched_fields,
+                )
                 if rescue_selection["selected"] is not None:
                     selection = rescue_selection
                     tag = "kata_similar_rescue"
@@ -393,10 +646,15 @@ class KataSimilarResolver(BaseResolver):
                 "dataset_via_keyword": info["via_keyword"], "n_candidates": n_candidates,
                 "rescue_query": rescue_query, "used_bm25_context": bool(evidence_text),
                 "bm25_evidence": evidence_text,
+                "enriched_context": self.enriched_context, "confidence": selection.get("confidence"),
+                "type_filter": self.type_filter, "type_rejected": type_rejected,
             },
         }]
         logger.info("[kata_similar] RESOLVED %s.%s -> %r (tag=%s)", ctx.table_name, ctx.col_name, element_name, tag)
         return ResolverResult(True, tag, description=definition, knowledge=knowledge)
 
 
-__all__ = ["KataDatasetPool", "KataSimilarResolver", "extract_keyword", "format_evidence", "retrieve_bm25_knowledge"]
+__all__ = [
+    "KataDatasetPool", "KataSimilarResolver", "extract_keyword", "filter_by_data_type", "format_evidence",
+    "format_sibling_columns", "format_term_entries", "retrieve_bm25_knowledge", "type_conflict",
+]
