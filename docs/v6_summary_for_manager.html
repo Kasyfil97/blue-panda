@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAGE Hierarchy v6 - Ringkasan</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1c2330;--muted:#5d6b7e;--line:#e2e6ec;--accent:#0b5fff;--good:#1a9b57;--warn:#d98a00;--bad:#d03b3b;--c1:#9aa7ba;--c2:#0b5fff;--c3:#14a39a}
+@media (prefers-color-scheme:dark){:root{--bg:#10141b;--card:#181e28;--fg:#e8ecf2;--muted:#93a0b4;--line:#2a3342;--accent:#5b92ff;--good:#3cc47f;--warn:#f0b13a;--bad:#ef6b6b;--c1:#5a687d;--c2:#5b92ff;--c3:#3cc8bd}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+.wrap{max-width:1000px;margin:0 auto;padding:24px 16px 64px}
+h1{font-size:2rem;margin:0 0 4px}
+h2{font-size:1.35rem;margin:40px 0 12px;padding-bottom:6px;border-bottom:2px solid var(--line)}
+h3{font-size:1.05rem;margin:0 0 6px}
+p{margin:0 0 10px}
+.sub{color:var(--muted)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+.grid{display:grid;gap:12px}
+.g4{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.g2{grid-template-columns:repeat(auto-fit,minmax(300px,1fr))}
+.kpi .n{font-size:2.2rem;font-weight:700;line-height:1.1}
+.kpi .l{color:var(--muted);font-size:.9rem}
+.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.flow{display:flex;flex-direction:column;gap:6px}
+.step{display:flex;gap:12px;align-items:flex-start;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.step .no{flex:none;width:28px;height:28px;border-radius:50%;background:var(--line);display:grid;place-items:center;font-weight:700;font-size:.85rem}
+.step.core{border-color:var(--accent);border-width:2px}
+.step.core .no{background:var(--accent);color:#fff}
+.step small{color:var(--muted);display:block}
+.arrow{text-align:center;color:var(--muted);line-height:1}
+.sub-steps{margin:8px 0 0;padding-left:0;list-style:none;display:grid;gap:4px}
+.sub-steps li{background:var(--bg);border-radius:8px;padding:6px 10px;font-size:.92rem}
+.tag{display:inline-block;font-size:.72rem;font-weight:700;padding:1px 7px;border-radius:99px;background:var(--accent);color:#fff;margin-left:6px;vertical-align:middle}
+.tl{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.tl .card b{color:var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:.9rem}
+th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:600}
+td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
+.scroll{overflow-x:auto}
+.bar-row{display:grid;grid-template-columns:90px 1fr 56px;gap:8px;align-items:center;margin:5px 0;font-size:.9rem}
+.bar{height:18px;border-radius:4px;background:var(--line);overflow:hidden}
+.bar i{display:block;height:100%;border-radius:4px}
+.legend{display:flex;gap:16px;font-size:.85rem;color:var(--muted);margin-bottom:8px;flex-wrap:wrap}
+.legend span::before{content:"";display:inline-inline;display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:6px;background:var(--lc)}
+ul.tight{margin:6px 0 0;padding-left:20px}
+ul.tight li{margin:3px 0}
+.note{border-left:4px solid var(--warn);background:var(--card);padding:10px 14px;border-radius:0 8px 8px 0;margin:8px 0}
+code{background:var(--line);padding:1px 5px;border-radius:4px;font-size:.88em}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>MAGE - Hierarchy v6</h1>
+<p class="sub">Ringkasan metode dan hasil evaluasi (eksperimen 5, branch <code>feature/hierarchy-v6-kata-similar</code>) - Oktober 2026</p>
+
+<h2>Ringkasan</h2>
+<p>MAGE membuat <b>deskripsi kolom</b> dan <b>business title</b> secara otomatis untuk data catalog BRI. Pada v6, deskripsi yang dinilai "similar" terhadap ground truth steward mencapai <b>92,3%</b>, naik dari 85,2% pada v3.</p>
+<div class="grid g4">
+  <div class="card kpi"><div class="n good">92,3%</div><div class="l">Deskripsi similar (181 dari 196 kolom)</div></div>
+  <div class="card kpi"><div class="n good">88,8%</div><div class="l">Business title similar (174 dari 196)</div></div>
+  <div class="card kpi"><div class="n">+7,1 pt</div><div class="l">Kenaikan deskripsi v3 → v6 (167 → 181 kolom)</div></div>
+  <div class="card kpi"><div class="n">190 / 196</div><div class="l">Kolom dijawab oleh resolver KATA (<code>kata_similar</code>)</div></div>
+</div>
+
+<h2>Masalah dan data uji</h2>
+<p>Input berupa nama tabel dan kolom teknis, banyak di antaranya singkatan (terutama tabel AS400, mis. <code>cartyp</code>, <code>jfxdrn</code>). Output berupa deskripsi dan business title yang sesuai istilah bisnis BRI.</p>
+<div class="grid g4">
+  <div class="card kpi"><div class="n">196</div><div class="l">kolom uji</div></div>
+  <div class="card kpi"><div class="n">20</div><div class="l">tabel</div></div>
+  <div class="card kpi"><div class="n">41</div><div class="l">kolom dari 4 tabel AS400 (lebih sulit)</div></div>
+  <div class="card kpi"><div class="n">GPT-4.1</div><div class="l">LLM judge (temperature 0)</div></div>
+</div>
+
+<h2>Metode v6 (high level)</h2>
+<p>Setiap kolom melewati rantai resolver berurutan. <b>Resolver pertama yang menjawab menang</b> (first-hit-wins). Sumber paling tepercaya (glosarium KATA) dicoba lebih dulu, LLM murni hanya sebagai pilihan terakhir.</p>
+<div class="flow">
+  <div class="step"><div class="no">1</div><div><b>exact_as400</b><small>Pencarian persis tabel + kolom di kamus AS400 (0 kolom terjawab pada uji ini)</small></div></div>
+  <div class="arrow">↓</div>
+  <div class="step core"><div class="no">2</div><div style="flex:1"><b>kata_similar</b> - inti v6 <span class="tag">190 kolom</span>
+    <small>LLM memilih elemen data yang paling cocok dari glosarium KATA milik tabel tersebut</small>
+    <ul class="sub-steps">
+      <li><b>a. Kumpulkan petunjuk:</b> ekspansi singkatan, kolom-kolom lain di tabel (beserta tipe data), konteks sistem</li>
+      <li><b>b. Ambil kandidat</b> elemen KATA untuk tabel itu</li>
+      <li><b>c. Filter tipe data</b> <span class="tag">v5</span> - buang kandidat yang bertentangan (mis. kolom numerik tidak boleh jadi "Nama ..."), tanpa LLM</li>
+      <li><b>d. Contoh dari steward</b> <span class="tag">v6</span> - sampai 5 contoh kolom bernama mirip yang sudah divalidasi steward, sebagai acuan penamaan</li>
+      <li><b>e. LLM memilih</b> satu kandidat dengan aturan: semua bagian nama harus terjelaskan, nama generik ikut entitas tabel, tipe harus cocok, pilih yang paling spesifik, <b>tolak semua</b> bila tidak ada yang cocok</li>
+      <li><b>f. Rescue search</b> ke KATA global bila semua ditolak</li>
+    </ul></div></div>
+  <div class="arrow">↓ bila tidak terjawab</div>
+  <div class="step"><div class="no">3</div><div><b>kata_alias</b><small>Kecocokan persis alias / relasi teknis di KATA (1 kolom)</small></div></div>
+  <div class="arrow">↓</div>
+  <div class="step"><div class="no">4</div><div><b>bm25_informatica → bm25_confluence → bm25_as400</b><small>Pencarian dokumen + LLM merangkum (4 + 1 kolom)</small></div></div>
+  <div class="arrow">↓</div>
+  <div class="step"><div class="no">5</div><div><b>pure LLM</b><small>Menebak tanpa bukti - hanya fallback terakhir</small></div></div>
+</div>
+
+<h2>Evolusi v3 → v6</h2>
+<div class="tl">
+  <div class="card"><b>v3</b><p>Rantai 7 resolver. <code>kata_similar</code> dinaikkan ke urutan 2 dan berjalan di semua kolom.</p></div>
+  <div class="card"><b>v4</b><p>Konteks <code>kata_similar</code> diperkaya (kolom tetangga, singkatan), aturan pemilihan lebih ketat, kamus singkatan AS400 ditambah.</p></div>
+  <div class="card"><b>v5</b><p>Filter tipe data deterministik pada kandidat KATA sebelum LLM memilih.</p></div>
+  <div class="card"><b>v6</b><p>Istilah domain baru (<code>ao</code>, <code>chk</code>, <code>nik</code>) dan contoh few-shot dari metadata yang divalidasi steward (10.476 kolom, 100 tabel, tidak overlap dengan data uji).</p></div>
+</div>
+
+<h2>Hasil scoring</h2>
+<p>Judge GPT-4.1 memberi label <b>similar</b> (makna sama), <b>partial</b> (korelasi terbatas), atau <b>unsimilar</b> terhadap ground truth. Angka di bawah adalah hasil cascade akhir dari 196 kolom.</p>
+
+<div class="grid g2">
+<div class="card">
+  <h3>Deskripsi similar per versi</h3>
+  <div class="bar-row"><span>v3</span><div class="bar"><i style="width:85.2%;background:var(--c1)"></i></div><b>85,2%</b></div>
+  <div class="bar-row"><span>v4</span><div class="bar"><i style="width:90.3%;background:var(--c1)"></i></div><b>90,3%</b></div>
+  <div class="bar-row"><span>v5</span><div class="bar"><i style="width:90.3%;background:var(--c1)"></i></div><b>90,3%</b></div>
+  <div class="bar-row"><span>v6</span><div class="bar"><i style="width:92.3%;background:var(--c2)"></i></div><b>92,3%</b></div>
+</div>
+<div class="card">
+  <h3>Business title similar per versi</h3>
+  <div class="bar-row"><span>v3</span><div class="bar"><i style="width:81.1%;background:var(--c1)"></i></div><b>81,1%</b></div>
+  <div class="bar-row"><span>v4</span><div class="bar"><i style="width:89.3%;background:var(--c1)"></i></div><b>89,3%</b></div>
+  <div class="bar-row"><span>v5</span><div class="bar"><i style="width:90.3%;background:var(--c1)"></i></div><b>90,3%</b></div>
+  <div class="bar-row"><span>v6</span><div class="bar"><i style="width:88.8%;background:var(--c2)"></i></div><b>88,8%</b></div>
+</div>
+</div>
+
+<div class="card scroll" style="margin-top:12px">
+<h3>Detail (jumlah kolom dari 196)</h3>
+<table>
+<tr><th>Metrik</th><th class="r">v3</th><th class="r">v4</th><th class="r">v5</th><th class="r">v6</th></tr>
+<tr><td>Deskripsi similar</td><td class="r">167</td><td class="r">177</td><td class="r">177</td><td class="r"><b>181</b></td></tr>
+<tr><td>Deskripsi partial / unsimilar</td><td class="r">16 / 12</td><td class="r">12 / 6</td><td class="r">12 / 6</td><td class="r">8 / 7</td></tr>
+<tr><td>Title similar</td><td class="r">159</td><td class="r">175</td><td class="r"><b>177</b></td><td class="r">174</td></tr>
+<tr><td>Deskripsi similar - AS400 (41 kolom)</td><td class="r">30</td><td class="r">38</td><td class="r">38</td><td class="r">37</td></tr>
+<tr><td>Deskripsi similar - non-AS400 (155 kolom)</td><td class="r">137</td><td class="r">139</td><td class="r">139</td><td class="r"><b>144</b></td></tr>
+<tr><td>Batas atas (oracle: resolver terbaik per kolom)</td><td class="r">179</td><td class="r">184</td><td class="r">185</td><td class="r">183</td></tr>
+</table>
+<p class="sub" style="margin-top:8px">Dari v5 ke v6: 7 kolom membaik, 4 memburuk, 184 tidak berubah. Hasil v6 (181) sudah dekat dengan batas atas (183).</p>
+</div>
+
+<div class="card" style="margin-top:12px">
+<h3>Mengapa berjenjang? Akurasi deskripsi tiap resolver (v6, dijalankan sendiri-sendiri)</h3>
+<div class="bar-row"><span>kata_similar</span><div class="bar"><i style="width:93.7%;background:var(--c3)"></i></div><b>93,7%</b></div>
+<div class="bar-row"><span>kata_alias</span><div class="bar"><i style="width:75.7%;background:var(--c1)"></i></div><b>75,7%</b></div>
+<div class="bar-row"><span>bm25_as400</span><div class="bar"><i style="width:48.5%;background:var(--c1)"></i></div><b>48,5%</b></div>
+<div class="bar-row"><span>bm25_info.</span><div class="bar"><i style="width:58.2%;background:var(--c1)"></i></div><b>58,2%</b></div>
+<div class="bar-row"><span>bm25_conf.</span><div class="bar"><i style="width:57.1%;background:var(--c1)"></i></div><b>57,1%</b></div>
+<div class="bar-row"><span>pure LLM</span><div class="bar"><i style="width:37.2%;background:var(--bad)"></i></div><b>37,2%</b></div>
+<p class="sub" style="margin-top:8px">Persentase dihitung dari kolom yang dijawab resolver tersebut. Glosarium KATA jauh lebih akurat daripada pencarian dokumen atau tebakan LLM, sehingga ditempatkan paling depan.</p>
+</div>
+
+<h2>Contoh perbaikan dan kegagalan</h2>
+<div class="card scroll">
+<table>
+<tr><th>Kolom</th><th>Ground truth</th><th>Status v6</th><th>Penyebab / perbaikan</th></tr>
+<tr><td><code>userid_ao</code></td><td>PN RM</td><td class="good">Diperbaiki</td><td>Istilah <code>ao</code> + contoh "PN Mantri"</td></tr>
+<tr><td><code>nik</code></td><td>Nomor ID</td><td class="good">Diperbaiki</td><td>Istilah domain baru</td></tr>
+<tr><td><code>jfxdrn</code></td><td>ID Kurs</td><td class="good">Diperbaiki</td><td>Kamus singkatan AS400</td></tr>
+<tr><td><code>cardsc</code></td><td>Deskripsi Kolektibilitas</td><td class="good">Diperbaiki (v4)</td><td>Singkatan + kolom tetangga</td></tr>
+<tr><td><code>chknum</code></td><td>Nomor Cek</td><td class="bad">Masih salah</td><td>Salah di semua versi</td></tr>
+<tr><td><code>amount</code> / <code>total</code></td><td>Jumlah Transaksi / Total Amount</td><td class="bad">Tertukar</td><td>Nama generik ambigu</td></tr>
+<tr><td><code>cartyp</code></td><td>Tipe Klasifikasi Parameter Loan</td><td class="bad">Regresi</td><td>Entri kamus <code>car</code> bentrok</td></tr>
+<tr><td><code>last_name</code></td><td>Nama Belakang</td><td class="bad">Masih salah</td><td>Menjadi "Nama Debitur"</td></tr>
+</table>
+</div>
+
+<h2>Catatan dan keterbatasan</h2>
+<div class="note"><b>Noise antar-run:</b> selisih sekitar 3 kolom bisa berasal dari variasi LLM / judge, jadi kenaikan v5 → v6 (+4) belum tentu seluruhnya efek metode.</div>
+<div class="note"><b>Bias data uji:</b> istilah baru v6 dipilih dari kesalahan di data uji yang sama, sehingga hasilnya cenderung sedikit optimistis.</div>
+<div class="note"><b>Business title turun 3 kolom</b> (177 → 174) sementara deskripsi naik. <b>Truthfulness</b> <code>kata_similar</code> turun dari 91,8% (v3) ke 86,8% (v6).</div>
+<div class="note"><b>Reranker LLM</b> (memilih satu jawaban dari semua resolver) dicoba di v4-v6 dan selalu lebih buruk (75,0% di v6), sehingga tidak dipakai.</div>
+<p class="sub">Uji end-to-end implementasi <code>mage_flow</code> pada 3 tabel (31 kolom): 30 dari 31 title sesuai ground truth.</p>
+
+<h2>Langkah berikutnya</h2>
+<ul class="tight">
+  <li>Gunakan contoh nilai kolom (sample values) - mis. untuk mendeteksi kolom JSON</li>
+  <li>Pilih istilah domain per tabel sebagai satu set, bukan per kolom</li>
+  <li>Perbaiki pencarian singkatan (longest-match) agar tidak bentrok seperti <code>car</code></li>
+  <li>Ukur variansi dengan menjalankan v6 berulang kali</li>
+  <li>Rapikan ground truth yang ambigu dan longgarkan judge untuk sinonim</li>
+</ul>
+
+<p class="sub" style="margin-top:32px">Sumber: <code>docs/evaluasi_hierarchy_v3_v6.md</code>, <code>layer_eval_results_v3 - v6</code> (xlsx), log di <code>evaluation/</code>.</p>
+</div>
+</body>
+</html>
